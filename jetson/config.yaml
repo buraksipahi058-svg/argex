@@ -1,0 +1,64 @@
+# ============================================================================
+#  Jetson telemetry/video gateway configuration
+#  This is the VEHICLE-SIDE observer. It reads the FROZEN STM32<->Jetson STATUS/
+#  HEARTBEAT stream and forwards a structured, read-only telemetry view to the
+#  Base Station. It never originates COMMAND and never disables the existing
+#  Jetson->STM heartbeat/autonomy traffic.
+# ============================================================================
+
+source:
+  # How the gateway OBSERVES the STM protocol bytes:
+  #   serial : read-only open of a UART carrying the STM STATUS/HEARTBEAT stream
+  #            (real vehicle). Does not write; does not own the control link.
+  #   udp    : receive raw STM protocol bytes over UDP (used by sim/fake_stm and
+  #            for an on-Jetson IPC tap where the existing process re-publishes
+  #            the raw frames it already reads).
+  type: udp
+
+  # --- serial source (real hardware) ---
+  serial_port: /dev/ttyTHS1
+  serial_baud: 115200          # matches haberlesme.cpp (do not change)
+
+  # --- udp source (sim / IPC tap) ---
+  udp_host: 127.0.0.1
+  udp_port: 9000
+
+quic:
+  host: 127.0.0.1              # Base Station backend address
+  port: 4433
+  use_datagrams_for_frames: true   # high-rate frames as QUIC datagrams (latest-wins)
+  verify: false                    # DEV: accept self-signed backend cert
+
+telemetry:
+  frame_rate_hz: 20.0         # high-frequency plane; <= STATUS rate (20 Hz)
+  gateway_heartbeat_hz: 1.0   # telemetry-plane liveness to the Base Station
+  status_stale_ms: 300        # no STATUS for this long -> STM telemetry stale
+  heartbeat_stale_ms: 600     # no HEARTBEAT for this long -> STM heartbeat stale
+  event_debounce_ms: 150      # min interval between repeats of the same event type
+
+video:
+  enabled: false              # set true on the Jetson with GStreamer + NVENC
+  base_host: 127.0.0.1        # Base Station (MediaMTX) address
+  encoder: h264               # h264 (NVENC, broad support) | h265
+  cameras:
+    - name: front
+      device: /dev/video0
+      width: 1280
+      height: 720
+      fps: 30
+      bitrate_kbps: 4000
+      rtp_port: 5000
+    - name: rear
+      device: /dev/video1
+      width: 1280
+      height: 720
+      fps: 30
+      bitrate_kbps: 4000
+      rtp_port: 5002
+    - name: turret
+      device: /dev/video2
+      width: 1920
+      height: 1080
+      fps: 60
+      bitrate_kbps: 8000
+      rtp_port: 5004

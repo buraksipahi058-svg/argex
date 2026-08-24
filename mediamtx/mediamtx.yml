@@ -1,0 +1,44 @@
+# ============================================================================
+#  MediaMTX — WebRTC bridge for the Base Station VIDEO plane.
+#  The Jetson pushes 3 camera streams here (RTSP, RTP under the hood); the
+#  browser consumes them via WebRTC/WHEP. This is fully SEPARATE from the
+#  QUIC/Protobuf telemetry plane.
+#
+#  Run:  mediamtx mediamtx/mediamtx.yml   (single static binary; or Docker:
+#        docker run --rm --network host -v $PWD/mediamtx/mediamtx.yml:/mediamtx.yml bluenviron/mediamtx)
+#
+#  Jetson side (see jetson/video_pipelines.py) publishes to:
+#     rtsp://<base-host>:8554/cam_front | cam_rear | cam_turret
+#  Frontend consumes WHEP at:
+#     http://<base-host>:8889/cam_front/whep  (etc.)
+#
+#  NOTE: config key names can vary slightly between MediaMTX versions; this
+#  matches MediaMTX v1.x. Check the version's bundled mediamtx.yml if a key is
+#  rejected.
+# ============================================================================
+
+logLevel: info
+
+# --- Ingest: RTSP (Jetson rtspclientsink publishes here) --------------------
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [udp, tcp]     # prefer UDP for low latency
+
+# --- Egress: WebRTC / WHEP (browser consumes here) --------------------------
+webrtc: yes
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189   # ICE host candidate (open this UDP port)
+# For access across a router/NAT, advertise the base station's LAN/public IP:
+# webrtcAdditionalHosts: [192.168.1.10]
+
+# --- Protocols we do not need ----------------------------------------------
+rtmp: no
+hls: no
+srt: no
+
+# --- The three vehicle cameras ---------------------------------------------
+# Publishers may connect at any time; consumers get the stream when present.
+paths:
+  cam_front:
+  cam_rear:
+  cam_turret:

@@ -1,0 +1,6 @@
+# Jetson gateway dependencies (telemetry plane).
+# Video plane uses system GStreamer (gst-launch-1.0 + NVENC), not pip.
+aioquic>=1.0
+protobuf>=4.25
+pyserial>=3.5
+PyYAML>=6.0

@@ -1,0 +1,7 @@
+# Base Station backend dependencies.
+aioquic>=1.0
+protobuf>=4.25
+aiosqlite>=0.19
+websockets>=13.0
+PyYAML>=6.0
+cryptography>=41.0   # used by aioquic + dev self-signed cert generation

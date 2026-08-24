@@ -1,0 +1,21 @@
+# ============================================================================
+#  Base Station backend configuration (READ-ONLY telemetry consumer)
+# ============================================================================
+
+quic:
+  host: 0.0.0.0            # listen for the Jetson gateway
+  port: 4433
+  cert_file: backend/dev-cert.pem   # DEV self-signed cert (auto-generated)
+  key_file: backend/dev-key.pem
+
+ws:
+  host: 0.0.0.0            # serves the React frontend (WebSocket + read-only REST)
+  port: 8080
+
+storage:
+  db_path: backend/telemetry.db
+  persist_frame_rate_hz: 5      # decimate DB writes; the live WS feed stays full-rate
+  retention_seconds: 3600       # prune rows older than this (0 = keep everything)
+
+links:
+  base_link_timeout_ms: 2500    # no gateway heartbeat/frame for this long -> base link lost

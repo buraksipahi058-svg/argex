@@ -1,0 +1,154 @@
+// ============================================================================
+//  UGV / İKA Base Station telemetry schema  (Jetson gateway -> Base Station)
+//  ---------------------------------------------------------------------------
+//  READ-ONLY monitoring. This schema intentionally contains NO command / control
+//  message. The Base Station observes the vehicle; it never actuates it.
+//
+//  Every field below is traceable to the FROZEN STM32<->Jetson protocol defined
+//  in needtocheck/ (haberlesme.h / haberlesme.cpp / jetson_parser.py). No value
+//  is invented. Source is noted in each comment as:  <- STATUS.<field>  etc.
+//
+//  Physical source (do NOT redesign): STM32 USART3 <-> Jetson @115200 8N1,
+//  frame  AA 55 | VER | TYPE | LEN | SEQ | PAYLOAD | CRC16-CCITT(LE).
+//  STATUS @20Hz, HEARTBEAT @10Hz.
+// ============================================================================
+
+syntax = "proto3";
+
+package ugv.telemetry.v1;
+
+option go_package = "github.com/ugv/basestation/gen/telemetry/v1;telemetryv1";
+
+// ---- Enums -----------------------------------------------------------------
+// proto3 requires a 0 = UNSPECIFIED entry; the gateway maps the raw firmware
+// integers explicitly, so the wire enum can follow proto convention safely.
+
+// STATUS.aktifMod : 0 = surus (drive), 1 = lazer.  (tank_main.ino MOD_SURUS/MOD_LAZER)
+enum ActiveMode {
+  ACTIVE_MODE_UNSPECIFIED = 0;
+  ACTIVE_MODE_DRIVE = 1;   // <- aktifMod == 0
+  ACTIVE_MODE_LASER = 2;   // <- aktifMod == 1
+}
+
+// HEARTBEAT payload byte 0 (kaynak). HB_KAYNAK_STM=0, HB_KAYNAK_JETSON=1.
+enum HeartbeatSource {
+  HEARTBEAT_SOURCE_UNSPECIFIED = 0;
+  HEARTBEAT_SOURCE_STM = 1;      // <- kaynak == 0
+  HEARTBEAT_SOURCE_JETSON = 2;   // <- kaynak == 1
+}
+
+// Deterministic transitions of existing telemetry. Derived by the gateway
+// (or, where noted, by the backend). The firmware is NOT modified to emit these.
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+
+  EVENT_MODE_CHANGED = 1;              // aktifMod changed (DRIVE<->LASER)
+
+  EVENT_AUTONOMOUS_ENGAGED = 2;        // durum.AUTO_EN 0 -> 1
+  EVENT_AUTONOMOUS_DISENGAGED = 3;     // durum.AUTO_EN 1 -> 0
+
+  EVENT_FAILSAFE_ACTIVATED = 4;        // durum.FAILSAFE 0 -> 1
+  EVENT_FAILSAFE_CLEARED = 5;          // durum.FAILSAFE 1 -> 0
+
+  EVENT_LASER_ON = 6;                  // lazer 0 -> 1
+  EVENT_LASER_OFF = 7;                 // lazer 1 -> 0
+
+  // RC (ELRS) link, strictly from the STATUS.elrsLink FIELD - only meaningful
+  // while STATUS is actually arriving. NOT to be confused with telemetry loss.
+  EVENT_ELRS_LINK_LOST = 8;            // elrsLink 1 -> 0
+  EVENT_ELRS_LINK_RESTORED = 9;        // elrsLink 0 -> 1
+
+  // STM's own view of the STM<->Jetson link, from durum.JETSON_LINK bit.
+  EVENT_STM_JETSON_LINK_LOST = 10;     // durum.JETSON_LINK 1 -> 0
+  EVENT_STM_JETSON_LINK_RESTORED = 11; // durum.JETSON_LINK 0 -> 1
+
+  EVENT_CMD_TIMEOUT_SET = 12;          // durum.CMD_TIMEOUT 0 -> 1
+  EVENT_CMD_TIMEOUT_CLEARED = 13;      // durum.CMD_TIMEOUT 1 -> 0
+
+  EVENT_CRC_ERROR = 14;                // durum.CRC_ERR observed (debounced burst)
+
+  // Gateway-derived: the STM STATUS stream stopped / resumed arriving at the
+  // Jetson. This is a TELEMETRY transport condition, distinct from ELRS/failsafe.
+  EVENT_STM_TELEMETRY_STALE = 15;
+  EVENT_STM_TELEMETRY_RESTORED = 16;
+
+  // Backend-derived only: the Jetson gateway link to the Base Station dropped /
+  // recovered (no envelopes / gateway heartbeat). Never sent by the gateway.
+  EVENT_BASE_LINK_LOST = 17;
+  EVENT_BASE_LINK_RESTORED = 18;
+}
+
+// ---- High-frequency actuator / control state -------------------------------
+// One-to-one with the STATUS payload's fast-changing fields. Values are the
+// vehicle's APPLIED outputs as reported by the STM (already scaled by MAX_GUC).
+message VehicleControlState {
+  int32 left_motor  = 1;   // <- STATUS.solMotor   ; percent, -100..100 (int8)
+  int32 right_motor = 2;   // <- STATUS.sagMotor   ; percent, -100..100 (int8)
+  uint32 pan_deg    = 3;   // <- STATUS.pan        ; degrees 0..180 (eff. 30..150)
+  uint32 tilt_deg   = 4;   // <- STATUS.tilt       ; degrees 0..180 (eff. 30..150)
+  bool  laser_on    = 5;   // <- STATUS.lazer      ; 0/1
+  ActiveMode mode   = 6;   // <- STATUS.aktifMod
+}
+
+// ---- Vehicle status flags --------------------------------------------------
+// All bits come from the single STATUS.durum byte + STATUS.elrsLink. raw_durum
+// is preserved verbatim for forward compatibility (reserved bits 5..7).
+message SystemStatus {
+  bool elrs_link_up       = 1;  // <- STATUS.elrsLink (RC link, STM's report)
+  bool jetson_link_up     = 2;  // <- STATUS.durum & ST_JETSON_LINK (STM's view)
+  bool cmd_timeout        = 3;  // <- STATUS.durum & ST_CMD_TIMEOUT
+  bool autonomous_active  = 4;  // <- STATUS.durum & ST_AUTO_EN
+  bool failsafe_active    = 5;  // <- STATUS.durum & ST_FAILSAFE
+  bool crc_error_recent   = 6;  // <- STATUS.durum & ST_CRC_ERR
+  uint32 raw_durum        = 7;  // <- STATUS.durum (verbatim)
+}
+
+// ---- Link / transport health (gateway-derived, deterministic) --------------
+// Nothing here is a vehicle measurement; these describe the telemetry link the
+// Jetson gateway itself observes.
+message LinkHealth {
+  uint32 packets_lost_total   = 1;  // <- SEQ-delta accounting (Protocol.lost)
+  uint32 crc_errors_total     = 2;  // <- gateway CRC-fail counter
+  double status_rate_hz       = 3;  // <- observed STATUS arrival rate
+  double heartbeat_rate_hz    = 4;  // <- observed HEARTBEAT arrival rate
+  uint32 stm_uptime_ms        = 5;  // <- HEARTBEAT(kaynak=STM).uptime_ms
+  bool   stm_status_fresh     = 6;  // <- gateway: STATUS gap <= stale threshold
+  int64  last_status_unix_ms  = 7;  // <- gateway receipt time of last STATUS
+  int64  last_heartbeat_unix_ms = 8;// <- gateway receipt time of last HEARTBEAT
+}
+
+// ---- Periodic telemetry frame (high-frequency plane) -----------------------
+message TelemetryFrame {
+  int64 timestamp_unix_ms      = 1;  // gateway wall-clock at emit
+  uint32 seq                   = 2;  // <- STATUS frame SEQ (from STM)
+  VehicleControlState control  = 3;
+  SystemStatus status          = 4;
+  LinkHealth link              = 5;
+}
+
+// ---- Event (event-driven plane, reliable) ----------------------------------
+message Event {
+  int64 timestamp_unix_ms = 1;
+  EventType type          = 2;
+  string detail           = 3;   // human-readable context, e.g. "DRIVE -> LASER"
+  // Optional snapshot of the raw byte(s) the event was derived from, for audit.
+  uint32 raw_durum        = 4;
+}
+
+// ---- Gateway liveness (telemetry-plane heartbeat) --------------------------
+// Lets the Base Station distinguish "gateway alive but STM quiet" from
+// "gateway/base link down". Sent on the reliable stream at a low rate.
+message GatewayHeartbeat {
+  int64 timestamp_unix_ms = 1;
+  uint32 stm_uptime_ms    = 2;   // last known STM uptime (may be stale)
+  bool   stm_alive        = 3;   // gateway still receiving STATUS from STM
+}
+
+// ---- Top-level envelope (one per QUIC datagram or stream message) ----------
+message TelemetryEnvelope {
+  oneof payload {
+    TelemetryFrame   frame     = 1;   // high-frequency (typically QUIC datagram)
+    Event            event     = 2;   // reliable stream
+    GatewayHeartbeat heartbeat = 3;   // reliable stream
+  }
+}
