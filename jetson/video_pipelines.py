@@ -10,9 +10,11 @@ Default transport is RTSP push (rtspclientsink) to MediaMTX, which carries RTP
 under the hood and is the simplest to bridge to WebRTC. A raw RTP/UDP variant is
 also provided (see build_udp_pipeline) for setups that prefer udpsink + an SDP.
 
-Encoders:
-  * Jetson (preferred): nvv4l2h264enc / nvv4l2h265enc (NVENC, hardware).
-  * Fallback (no NVENC): x264enc / x265enc (software) — set encoder accordingly.
+Encoders (config `video.encoder`):
+  * Jetson NVENC (hardware, preferred): "h264" | "h265"  (nvv4l2h264enc/h265enc)
+  * Software (CPU, no NVENC needed):     "x264" | "x265" | "openh264"
+    Use software when the nvv4l2* GStreamer plugin is unavailable; x264 is the
+    best default (tune=zerolatency, speed-preset=ultrafast).
 """
 from __future__ import annotations
 
@@ -23,14 +25,51 @@ from typing import List
 from .config import CameraConfig, VideoConfig, load_config
 
 
+# Software encoders run on CPU (no NVENC / no NVMM memory). Use these when the
+# Jetson's nvv4l2* GStreamer plugin is unavailable. x264 is the best default.
+_SOFTWARE_ENCODERS = {"x264", "x265", "openh264"}
+
+
+def _convert_chain(encoder: str) -> str:
+    """Colorspace/scale stage feeding the encoder.
+
+    NVENC needs NV12 in NVMM (GPU) memory via nvvidconv; software encoders take
+    plain system-memory frames via videoconvert.
+    """
+    if encoder in _SOFTWARE_ENCODERS:
+        return "videoconvert"
+    return "nvvidconv ! video/x-raw(memory:NVMM),format=NV12"
+
+
 def _encoder_chain(encoder: str, bitrate_kbps: int) -> str:
-    """GStreamer encode + payload chain for the chosen codec."""
+    """GStreamer encode + payload chain for the chosen codec.
+
+    Hardware (Jetson NVENC): h264 | h265
+    Software (CPU):          x264 | x265 | openh264
+    """
+    # --- software (CPU) ---
+    if encoder == "x264":
+        return (
+            f"x264enc tune=zerolatency speed-preset=ultrafast key-int-max=30 "
+            f"bitrate={bitrate_kbps} ! h264parse ! rtph264pay config-interval=1 pt=96"
+        )
+    if encoder == "x265":
+        return (
+            f"x265enc tune=zerolatency speed-preset=ultrafast key-int-max=30 "
+            f"bitrate={bitrate_kbps} ! h265parse ! rtph265pay config-interval=1 pt=96"
+        )
+    if encoder == "openh264":
+        return (
+            f"openh264enc bitrate={bitrate_kbps * 1000} gop-size=30 complexity=low "
+            f"! h264parse ! rtph264pay config-interval=1 pt=96"
+        )
+    # --- hardware (Jetson NVENC) ---
     if encoder == "h265":
         return (
             f"nvv4l2h265enc insert-sps-pps=true idrinterval=30 "
             f"bitrate={bitrate_kbps * 1000} ! h265parse ! rtph265pay config-interval=1 pt=96"
         )
-    # default h264
+    # default h264 (NVENC)
     return (
         f"nvv4l2h264enc insert-sps-pps=true idrinterval=30 "
         f"bitrate={bitrate_kbps * 1000} ! h264parse ! rtph264pay config-interval=1 pt=96"
@@ -38,24 +77,26 @@ def _encoder_chain(encoder: str, bitrate_kbps: int) -> str:
 
 
 def build_rtsp_pipeline(cam: CameraConfig, video: VideoConfig) -> str:
-    """v4l2 camera -> NVENC -> RTP -> RTSP publish to MediaMTX."""
+    """v4l2 camera -> (NVENC|software) -> RTP -> RTSP publish to MediaMTX."""
     caps = f"video/x-raw,width={cam.width},height={cam.height},framerate={cam.fps}/1"
+    convert = _convert_chain(video.encoder)
     enc = _encoder_chain(video.encoder, cam.bitrate_kbps)
     rtsp_url = f"rtsp://{video.base_host}:8554/cam_{cam.name}"
     return (
         f"v4l2src device={cam.device} io-mode=2 ! {caps} ! "
-        f"nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
+        f"{convert} ! "
         f"{enc} ! rtspclientsink location={rtsp_url} latency=0"
     )
 
 
 def build_udp_pipeline(cam: CameraConfig, video: VideoConfig) -> str:
-    """v4l2 camera -> NVENC -> RTP/UDP (requires an SDP on the receiver side)."""
+    """v4l2 camera -> (NVENC|software) -> RTP/UDP (requires an SDP on the receiver side)."""
     caps = f"video/x-raw,width={cam.width},height={cam.height},framerate={cam.fps}/1"
+    convert = _convert_chain(video.encoder)
     enc = _encoder_chain(video.encoder, cam.bitrate_kbps)
     return (
         f"v4l2src device={cam.device} io-mode=2 ! {caps} ! "
-        f"nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
+        f"{convert} ! "
         f"{enc} ! udpsink host={video.base_host} port={cam.rtp_port} sync=false async=false"
     )
 
