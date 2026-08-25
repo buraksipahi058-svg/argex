@@ -1,33 +1,25 @@
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
+# STM32CubeIDE derleme ciktilari
+Debug/
+Release/
+*.o
+*.d
+*.su
+*.elf
+*.bin
+*.hex
+*.map
+*.list
 
-node_modules
-dist
-dist-ssr
-*.local
+# Eclipse/CubeIDE gecici dosyalari
+.settings/
+.metadata/
+*.launch
+RemoteSystemsTempFiles/
 
-# Python / backend
-.venv/
-__pycache__/
-*.pyc
-gen/telemetry_pb2.py
-backend/telemetry.db
-backend/dev-cert.pem
-backend/dev-key.pem
+# CubeMX yedekleri
+*.ioc.bak
+.mxproject
 
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+# Windows
+Thumbs.db
+desktop.ini
