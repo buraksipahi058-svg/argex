@@ -1,11 +1,11 @@
 # STEP BY STEP — Gerçek STM32 → Jetson → Base Station kurulumu
 
-Bu dosya, **gerçek araçtan** (STM32 + Reactor firmware) telemetriyi Jetson üzerinden
+Bu dosya, **gerçek araçtan** (STM32 native firmware) telemetriyi Jetson üzerinden
 Base Station paneline kadar getirmek için sıfırdan yapılacakları anlatır.
 
 ```
-STM32 (Reactor fw + telemetri)
-   │  UART  PB6 -> Jetson RX  (115200, 3.3V, tek yön)
+STM32 (native CubeIDE fw + telemetri)
+   │  UART  PC6 -> Jetson RX  (115200, 3.3V, tek yön)
    ▼
 Jetson  (jetson/gateway.py)  ──QUIC/Protobuf──►  Base Station backend  ──WebSocket──►  Frontend
    │
@@ -15,7 +15,7 @@ Jetson  (jetson/gateway.py)  ──QUIC/Protobuf──►  Base Station backend 
 Nereye ne "kurulur" özeti:
 | Cihaz | Ne yapılır |
 |---|---|
-| **STM32** | Yazılım kurulmaz → **firmware FLASH'lanır** (`firmware/reactor_telemetry/`) |
+| **STM32** | Yazılım kurulmaz → **firmware FLASH'lanır** (`argexika/`, STM32CubeIDE projesi) |
 | **Jetson** | Python + proje dosyaları + `jetson/requirements.txt` (gateway burada çalışır) |
 | **Base Station (laptop/PC)** | Python (backend) + Node (frontend) |
 
@@ -24,24 +24,32 @@ Nereye ne "kurulur" özeti:
 ## BÖLÜM 1 — STM32 firmware'ini yükle
 
 ### 1.1 Geliştirme makinesine kur
-- **Arduino IDE** + **STM32 core** (STM32duino / "STM32 MCU based boards", kart: *STM32F407G-DISC1* veya *Generic STM32F4 / DISCOVERY F407VG*).
-- Kütüphane: **AlfredoCRSF** (Library Manager'dan).
+- **STM32CubeIDE** (derleme + flash tek araçta) — kart: *STM32F407G-DISC1*.
+  - Alternatif flash: **STM32CubeProgrammer** (üretilen `.elf`/`.bin` dosyasını yazar).
+- Ekstra kütüphane GEREKMEZ — CRSF çözücü, Reactor sürücüsü, servo ve telemetri
+  projeye dahil (`argexika/Core/Src/` içinde `crsf.c`, `reactor.c`, `servo.c`,
+  `haberlesme.c`).
 
-### 1.2 Sketch'i aç ve yükle
-- Klasör: `firmware/reactor_telemetry/` (içinde `reactor_telemetry.ino` + `haberlesme.h` + `haberlesme.cpp`).
-- Kartı ST-Link/USB ile bağla → Derle → Yükle.
-- **GÜVENLİK:** ilk denemede **tekerlekler havada** olsun.
+### 1.2 Projeyi aç ve yükle
+- Proje: `argexika/` (STM32CubeIDE projesi — `.project` / `.cproject` / `argexika.ioc`).
+- CubeIDE → *File > Open Projects from File System* → `argexika/` seç → **Build** (🔨)
+  → kartı ST-Link/USB ile bağla → **Run/Debug** (flash eder).
+- **GÜVENLİK:** ilk denemede **tekerlekler havada** olsun; ayrıca aracı sürmek için
+  kumandada **ARM anahtarı (CH5) yukarı** olmalı (aşağıysa motorlar dönmez).
 
-### 1.3 STM32 pin haritası (bu firmware'de)
-Pinleri firmware başındaki `#define`'lardan ve STM32F407G-DISC1 kılavuzundan (UM1472) bulursun.
-| İşlev | STM32 pini | UART |
+### 1.3 STM32 pin haritası (native firmware — `argexika/Core/Src/main.c`)
+| İşlev | STM32 pini | UART/Timer |
 |---|---|---|
-| CRSF alıcı (RC) | PB11=RX, PB10=TX | USART3 @420000 |
-| Sol Reactor sürücü | **PA2** (TX) | USART2 @38400 |
-| Sağ Reactor sürücü | **PC6** (TX) | USART6 @38400 |
-| Servo (opsiyonel) | PB0 / PB1, ateş PE7 | — |
-| LED'ler | PD12–15 | — |
-| **JETSON telemetri** | **PB6** (TX) | **USART1 @115200** ← bize lazım olan |
+| CRSF alıcı (RC) | **PA3** (RX) | USART2 @420000 (DMA) |
+| Sol Reactor sürücü | **PB6** (TX) | USART1 @38400 |
+| Sağ Reactor sürücü | **PD8** (TX) | USART3 @38400 |
+| Taret servo (pan/tilt) | PD12 / PD13 | TIM4 CH1/CH2 (50 Hz PWM) |
+| Reactor EN çıkışı | PE0 | GPIO |
+| LED'ler | PD14 (kırmızı=FAILSAFE), PD15 (mavi=LINK) | GPIO |
+| **JETSON telemetri** | **PC6** (TX) | **USART6 @115200** ← bize lazım olan |
+
+> ⚠️ Eski Arduino firmware'inde telemetri **PB6**'daydı; native firmware'de PB6 artık
+> **Sol Reactor**'a gidiyor. Telemetri **PC6 (USART6)**'ya taşındı — kabloyu buna göre tak.
 
 ---
 
@@ -50,18 +58,18 @@ Pinleri firmware başındaki `#define`'lardan ve STM32F407G-DISC1 kılavuzundan 
 Sadece **2 kablo** yeterli (tek yönlü telemetri):
 
 ```
-STM32  PB6 (USART1 TX)  ───────────►  Jetson UART RX
+STM32  PC6 (USART6 TX)  ───────────►  Jetson UART RX
 STM32  GND              ───────────►  Jetson GND
 ```
 
 | STM32 | → | Jetson 40-pin header |
 |---|---|---|
-| **PB6** (USART1 TX) | → | **Pin 10 (UART RXD)** |
+| **PC6** (USART6 TX) | → | **Pin 10 (UART RXD)** |
 | **GND** | → | **Pin 6** (veya 9/14/…GND) |
 
 - Baud **115200**, 8N1.
 - ⚠️ **Voltaj:** STM32 UART = 3.3V, Jetson 40-pin UART = 3.3V → **doğrudan bağlanır, level shifter gerekmez.** Jetson pinine **ASLA 5V verme** (kartı yakar).
-- STM PB6 = **çıkış (TX)**, Jetson pini = **giriş (RX)**. TX→RX olacak şekilde bağla (TX-TX yaparsan çalışmaz).
+- STM PC6 = **çıkış (TX)**, Jetson pini = **giriş (RX)**. TX→RX olacak şekilde bağla (TX-TX yaparsan çalışmaz).
 
 ### "Jetson'ın RX pini / UART cihazı nerede?"
 - Fiziksel: Jetson dev kit **40-pin header**'da **Pin 8 = TXD, Pin 10 = RXD, Pin 6 = GND**. (Nano / Xavier NX / Orin Nano/NX dev kit hepsi bu düzeni paylaşır.)
@@ -150,13 +158,14 @@ npm run dev                 # http://localhost:5173
 ## BÖLÜM 5 — Uçtan uca doğrulama sırası
 
 1. STM32 flash'lı, **tekerlekler havada**.
-2. STM **PB6 → Jetson Pin 10 (RX)**, **GND → GND**.
+2. STM **PC6 → Jetson Pin 10 (RX)**, **GND → GND**.
 3. Jetson: `cat /dev/ttyTHS1 | xxd` → `aa 55 …` akıyor. ✅
 4. Jetson: `python3 -m jetson.gateway` (serial).
 5. Base station: `python -m backend.main` + `npm run dev`.
 6. Panelde (`localhost:5173`):
-   - Motor L/R, MODE, ELRS link **gerçek araca göre oynamalı**.
-   - Kumandayı **kapat** → **FAILSAFE** + ELRS link **DOWN** düşmeli.
+   - Motor L/R ve ELRS link **gerçek araca göre oynamalı**; taret (pan/tilt) kumandayla döner.
+   - MODE **hep DRIVE** (native firmware'de ayrı lazer modu yok — normal).
+   - Kumandayı **kapat** → **FAILSAFE** + ELRS link **DOWN**; **ARM (CH5) aşağı** → motorlar durur.
    - `OPERATION` **hep MANUAL** (bu firmware otonomi göndermiyor — normal).
 
 ---
@@ -185,5 +194,8 @@ Telemetriden bağımsız. Zaten kurduğun akış:
 
 ## Hatırlatma
 Tel üzerindeki protokol (`haberlesme`) **değişmedi**; bu yüzden `jetson/`, `proto/`,
-`backend/`, `src/` aynı kaldı. Gerçek veriye geçiş sadece **STM firmware'ine telemetri
-eklemek (yapıldı)** + **jetson/config.yaml'ı `serial` yapmak** + **2 kablo** meselesi.
+`backend/`, `src/` aynı kaldı. STM tarafı artık **native STM32CubeIDE firmware'i**
+(`argexika/`); telemetri bu firmware'e HAL/C olarak **port edildi (yapıldı)** ve
+`argexika/Core/Src/haberlesme.c` içinde üretilen çerçeveler base station parser'ıyla
+**birebir aynı**. Gerçek veriye geçiş sadece **jetson/config.yaml'ı `serial` yapmak**
++ **2 kablo (PC6 → Jetson RX, GND)** meselesi.

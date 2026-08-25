@@ -33,6 +33,7 @@
 #include "crsf.h"
 #include "reactor.h"
 #include "servo.h"
+#include "haberlesme.h"      /* STM -> Jetson telemetri (USART6 / PC6) */
 #include <string.h>
 
 /* ==========================================================================
@@ -109,6 +110,10 @@ static servo_t   g_tilt;
 static uint8_t   g_rx_buf[CRSF_RX_BUF_SIZE];
 static uint16_t  g_rx_tail = 0;
 
+/* Telemetri icin son UYGULANAN palet hizlari (-1000..+1000; dur = 0). */
+static int16_t   g_applied_left  = 0;
+static int16_t   g_applied_right = 0;
+
 /* ==========================================================================
  *  Fonksiyon prototipleri
  * ========================================================================== */
@@ -128,6 +133,8 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);   /* stm32f4xx_hal_msp.c icin
 static void CRSF_PumpDMA(void);
 static void Drive_Update(uint32_t now_ms, uint8_t link_ok);
 static void Turret_Update(uint32_t now_ms, uint8_t link_ok);
+static void Telemetry_Update(uint32_t now_ms, uint8_t link_ok);
+static uint8_t Servo_UsToDeg(const servo_t *s);
 
 /* ==========================================================================
  *  MAIN
@@ -156,6 +163,9 @@ int main(void)
     Reactor_Stop(&g_left);
     Reactor_Stop(&g_right);
     HAL_GPIO_WritePin(GPIOE, GPIO_PIN_0, GPIO_PIN_RESET);   /* EN = pasif */
+
+    /* Jetson telemetri hattini baslat (USART6 / PC6 -> Jetson RX, tek yonlu) */
+    Haberlesme_Init();
 
     /* CRSF alimini dairesel DMA ile baslat */
     if (HAL_UART_Receive_DMA(&huart2, g_rx_buf, CRSF_RX_BUF_SIZE) != HAL_OK)
@@ -188,6 +198,9 @@ int main(void)
         /* 4) Durum LED'leri */
         HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, link_ok ? GPIO_PIN_RESET : GPIO_PIN_SET);
         HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, link_ok ? GPIO_PIN_SET   : GPIO_PIN_RESET);
+
+        /* 5) Jetson telemetrisi (STATUS 20 Hz + HEARTBEAT 10 Hz) */
+        Telemetry_Update(now, link_ok);
     }
 }
 
@@ -232,6 +245,8 @@ static void Drive_Update(uint32_t now_ms, uint8_t link_ok)
         Reactor_Stop(&g_left);
         Reactor_Stop(&g_right);
         HAL_GPIO_WritePin(GPIOE, GPIO_PIN_0, GPIO_PIN_RESET);
+        g_applied_left  = 0;   /* telemetri: motorlar durdu */
+        g_applied_right = 0;
         return;
     }
 
@@ -243,6 +258,8 @@ static void Drive_Update(uint32_t now_ms, uint8_t link_ok)
     {
         Reactor_Stop(&g_left);
         Reactor_Stop(&g_right);
+        g_applied_left  = 0;   /* telemetri: silahsiz -> motorlar durdu */
+        g_applied_right = 0;
         return;
     }
 
@@ -280,6 +297,9 @@ static void Drive_Update(uint32_t now_ms, uint8_t link_ok)
        sag surucununkiler sag paletin motorlarini surer. */
     Reactor_SetSpeed(&g_left,  (int16_t)left,  (int16_t)left);
     Reactor_SetSpeed(&g_right, (int16_t)right, (int16_t)right);
+
+    g_applied_left  = (int16_t)left;    /* telemetri: uygulanan hizlar */
+    g_applied_right = (int16_t)right;
 }
 
 /* ==========================================================================
@@ -322,6 +342,52 @@ static void Turret_Update(uint32_t now_ms, uint8_t link_ok)
 #else
     Servo_SetNorm(&g_tilt, (int16_t)tilt_in);
 #endif
+}
+
+/* ==========================================================================
+ *  TELEMETRI: Jetson'a STATUS (20 Hz) + HEARTBEAT (10 Hz)
+ *  Tek yonlu: STM sadece gonderir. Durum bitlerinden yalnizca FAILSAFE
+ *  uretilir (Jetson komutu/otonomi yok -> digerleri 0). Eski Arduino
+ *  firmware'inin aracDurumGuncelle() mantiginin native karsiligidir.
+ * ========================================================================== */
+
+/* Servo darbe genisligini (min_us..max_us) 0..180 dereceye esler. */
+static uint8_t Servo_UsToDeg(const servo_t *s)
+{
+    int32_t span = (int32_t)s->max_us - (int32_t)s->min_us;
+    if (span <= 0) { return 90U; }
+    int32_t deg = ((int32_t)s->pos_us - (int32_t)s->min_us) * 180 / span;
+    if (deg < 0)   { deg = 0;   }
+    if (deg > 180) { deg = 180; }
+    return (uint8_t)deg;
+}
+
+static void Telemetry_Update(uint32_t now_ms, uint8_t link_ok)
+{
+    static uint32_t t_status = 0;
+    static uint32_t t_hb     = 0;
+
+    if ((now_ms - t_status) >= STATUS_PERIOD_MS)   /* 20 Hz */
+    {
+        t_status = now_ms;
+
+        VehicleState st;
+        st.solMotor = (int8_t)(g_applied_left  / 10);   /* -1000..1000 -> -100..100 */
+        st.sagMotor = (int8_t)(g_applied_right / 10);
+        st.pan      = Servo_UsToDeg(&g_pan);
+        st.tilt     = Servo_UsToDeg(&g_tilt);
+        st.lazer    = 0U;                               /* bu firmware'de lazer/ates cikisi yok */
+        st.aktifMod = 0U;                               /* yalnizca surus modu */
+        st.elrsLink = link_ok ? 1U : 0U;
+        st.durum    = link_ok ? 0U : ST_FAILSAFE;       /* diger bitler bu firmware'de 0 */
+        Haberlesme_SendStatus(&st);
+    }
+
+    if ((now_ms - t_hb) >= HB_PERIOD_MS)               /* 10 Hz */
+    {
+        t_hb = now_ms;
+        Haberlesme_SendHeartbeat(now_ms);
+    }
 }
 
 /* ==========================================================================
