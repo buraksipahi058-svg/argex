@@ -40,10 +40,12 @@ class TelemetryConfig:
 class CameraConfig:
     name: str
     device: str
-    width: int = 1280
-    height: int = 720
+    input_format: str = "yuyv422"     # v4l2 giris formati: "yuyv422" | "mjpeg"
+    width: int = 640
+    height: int = 480
     fps: int = 30
-    bitrate_kbps: int = 4000
+    bitrate_kbps: int = 1000
+    mode: str = "drive"               # bu kamera hangi arac modunda yayinlanir: "drive" | "laser"
     rtp_port: int = 5000
 
 

@@ -15,6 +15,7 @@
   *  PE0   GPIO out                 -> (ops.) Reactor EN pini / role surucu
   *  PD14  GPIO out                 -> Kirmizi LED : FAILSAFE
   *  PD15  GPIO out                 -> Mavi LED    : LINK OK / ARM
+  *  PE1   GPIO out                 -> LAZER atesleme cikisi (HIGH = ates)
   *
   *  KUMANDA KANALLARI (EdgeTX, Mode 2, AETR)
   *  ------------------------------------------------------------------
@@ -22,9 +23,10 @@
   *  CH2  Elevator (sag stick dikey)  -> ILERI / GERI
   *  CH3  Throttle (sol stick dikey)  -> TILT  (dikey eksen)  [tirtikli, konum tutar]
   *  CH4  Rudder   (sol stick yatay)  -> PAN   (yatay eksen)  [merkeze doner]
-  *  CH5  AUX1 (SA)                   -> ARM  (>1700us = motorlar aktif)
+  *  CH5  AUX1 (SA)                   -> ARM / MOD  (>1700us = SURUS+armed; <=1700us = LAZER modu)
   *  CH6  AUX2 (SB, 3 pozisyon)       -> HIZ LIMITI  (dusuk/orta/yuksek)
   *  CH7  AUX3 (SC)                   -> Servo merkeze donus (>1700us)
+  *  CH10 AUX                         -> ATES tetigi (>1700us, yalniz LAZER modunda)
   ******************************************************************************
   */
 
@@ -45,9 +47,11 @@
 #define CH_THROTTLE         2U      /* ileri/geri */
 #define CH_TILT             3U      /* dikey eksen servo */
 #define CH_PAN              4U      /* yatay eksen servo */
-#define CH_ARM              5U      /* silahlandirma anahtari */
+#define CH_ARM              5U      /* silahlandirma anahtari (armed=SURUS, disarmed=LAZER) */
 #define CH_SPEED_MODE       6U      /* 3 pozisyon hiz limiti */
 #define CH_TURRET_CENTER    7U      /* servolari merkeze al */
+#define CH_FIRE             10U     /* lazer atesleme tetigi (yalniz LAZER modu) */
+#define FIRE_THRESH_US      1700U   /* CH10 bu esigin ustunde -> ates */
 
 /* --- Surus davranisi --- */
 #define STICK_DEADBAND_US   25U     /* stick merkez olu bandi */
@@ -114,6 +118,10 @@ static uint16_t  g_rx_tail = 0;
 static int16_t   g_applied_left  = 0;
 static int16_t   g_applied_right = 0;
 
+/* Lazer/ates durumu (telemetri + PE1 cikisi). */
+static uint8_t   g_laser_mode = 0;   /* 0 = surus, 1 = lazer modu (CH5 disarmed) */
+static uint8_t   g_fire_on    = 0;   /* 0/1 lazer atesleme cikisi (PE1) */
+
 /* ==========================================================================
  *  Fonksiyon prototipleri
  * ========================================================================== */
@@ -133,6 +141,7 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);   /* stm32f4xx_hal_msp.c icin
 static void CRSF_PumpDMA(void);
 static void Drive_Update(uint32_t now_ms, uint8_t link_ok);
 static void Turret_Update(uint32_t now_ms, uint8_t link_ok);
+static void Laser_Update(uint32_t now_ms, uint8_t link_ok);
 static void Telemetry_Update(uint32_t now_ms, uint8_t link_ok);
 static uint8_t Servo_UsToDeg(const servo_t *s);
 
@@ -159,10 +168,11 @@ int main(void)
     Servo_Init(&g_pan,  &htim4, TIM_CHANNEL_1, PAN_MIN_US,  PAN_MAX_US,  PAN_CENTER_US);
     Servo_Init(&g_tilt, &htim4, TIM_CHANNEL_2, TILT_MIN_US, TILT_MAX_US, TILT_CENTER_US);
 
-    /* Guvenlik: acilista motorlar kesinlikle dursun */
+    /* Guvenlik: acilista motorlar kesinlikle dursun, lazer kapali olsun */
     Reactor_Stop(&g_left);
     Reactor_Stop(&g_right);
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_0, GPIO_PIN_RESET);   /* EN = pasif */
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_0, GPIO_PIN_RESET);   /* EN = pasif   */
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);   /* ATES = kapali */
 
     /* Jetson telemetri hattini baslat (USART6 / PC6 -> Jetson RX, tek yonlu) */
     Haberlesme_Init();
@@ -194,6 +204,7 @@ int main(void)
         /* 3) Cikislari guncelle */
         Drive_Update(now, link_ok);
         Turret_Update(now, link_ok);
+        Laser_Update(now, link_ok);
 
         /* 4) Durum LED'leri */
         HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, link_ok ? GPIO_PIN_RESET : GPIO_PIN_SET);
@@ -345,6 +356,51 @@ static void Turret_Update(uint32_t now_ms, uint8_t link_ok)
 }
 
 /* ==========================================================================
+ *  LAZER / ATES: CH5 disarmed -> LAZER modu; CH10 -> atesleme (PE1)
+ *
+ *  Mod, ARM anahtarindan turetilir (ayri bir mod kanali yok):
+ *    CH5 > 1700us  -> SURUS  (armed)   : atesleme KILITLI
+ *    CH5 <= 1700us -> LAZER  (disarmed): motorlar zaten durur, ates serbest
+ *
+ *  Guvenlik:
+ *    - Link yoksa (failsafe)  -> ates KAPALI, mod = surus.
+ *    - Surus modunda          -> ates KAPALI (CH10 yok sayilir).
+ *    - Lazer modunda          -> yalniz CH10 > 1700us iken ates.
+ *  Taret (pan/tilt) her iki modda da Turret_Update ile calismaya devam eder.
+ * ========================================================================== */
+static void Laser_Update(uint32_t now_ms, uint8_t link_ok)
+{
+    (void)now_ms;
+
+    /* FAILSAFE: her sey guvenli tarafa */
+    if (!link_ok)
+    {
+        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
+        g_fire_on    = 0U;
+        g_laser_mode = 0U;
+        return;
+    }
+
+    /* ARM anahtari: armed -> SURUS, disarmed -> LAZER */
+    uint8_t armed = (CRSF_GetChannelUs(&g_crsf, CH_ARM) > 1700U) ? 1U : 0U;
+
+    if (armed)
+    {
+        /* SURUS modu: atesleme kilitli */
+        g_laser_mode = 0U;
+        g_fire_on    = 0U;
+        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
+        return;
+    }
+
+    /* LAZER modu: CH10 tetigi ile atesle */
+    g_laser_mode = 1U;
+    uint8_t fire = (CRSF_GetChannelUs(&g_crsf, CH_FIRE) > FIRE_THRESH_US) ? 1U : 0U;
+    g_fire_on    = fire;
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, fire ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+/* ==========================================================================
  *  TELEMETRI: Jetson'a STATUS (20 Hz) + HEARTBEAT (10 Hz)
  *  Tek yonlu: STM sadece gonderir. Durum bitlerinden yalnizca FAILSAFE
  *  uretilir (Jetson komutu/otonomi yok -> digerleri 0). Eski Arduino
@@ -376,8 +432,8 @@ static void Telemetry_Update(uint32_t now_ms, uint8_t link_ok)
         st.sagMotor = (int8_t)(g_applied_right / 10);
         st.pan      = Servo_UsToDeg(&g_pan);
         st.tilt     = Servo_UsToDeg(&g_tilt);
-        st.lazer    = 0U;                               /* bu firmware'de lazer/ates cikisi yok */
-        st.aktifMod = 0U;                               /* yalnizca surus modu */
+        st.lazer    = g_fire_on;                        /* CH10 atesleme durumu (PE1) */
+        st.aktifMod = g_laser_mode;                     /* 0 = surus, 1 = lazer modu */
         st.elrsLink = link_ok ? 1U : 0U;
         st.durum    = link_ok ? 0U : ST_FAILSAFE;       /* diger bitler bu firmware'de 0 */
         Haberlesme_SendStatus(&st);
@@ -559,9 +615,9 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-    /* Reactor EN cikisi: PE0 */
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_0, GPIO_PIN_RESET);
-    GPIO_InitStruct.Pin   = GPIO_PIN_0;
+    /* Reactor EN cikisi: PE0 ; Lazer atesleme cikisi: PE1 (HIGH = ates) */
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_0 | GPIO_PIN_1, GPIO_PIN_RESET);
+    GPIO_InitStruct.Pin   = GPIO_PIN_0 | GPIO_PIN_1;
     GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull  = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;

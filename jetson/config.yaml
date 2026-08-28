@@ -13,7 +13,7 @@ source:
   #   udp    : receive raw STM protocol bytes over UDP (used by sim/fake_stm and
   #            for an on-Jetson IPC tap where the existing process re-publishes
   #            the raw frames it already reads).
-  type: udp
+  type: serial
 
   # --- serial source (real hardware) ---
   serial_port: /dev/ttyTHS1
@@ -37,28 +37,39 @@ telemetry:
   event_debounce_ms: 150      # min interval between repeats of the same event type
 
 video:
-  enabled: false              # set true on the Jetson with GStreamer + NVENC
-  base_host: 127.0.0.1        # Base Station (MediaMTX) address
-  encoder: h264               # h264 (NVENC, broad support) | h265
+  # Gateway, kameralari MOD-FARKINDA yonetir (ffmpeg -> MediaMTX RTSP push):
+  #   DRIVE modu  -> front + rear yayinda, turret kapali
+  #   LASER modu  -> turret yayinda, front + rear kapali
+  # Mod, STM aktifMod telemetrisinden (kumandada CH5) gelir; gecis otomatiktir.
+  # Ayni anda en fazla 2 kamera acik kalir: hem Wi-Fi bandini hem de USB
+  # isochronous butcesini (3 es-zamanli -> VIDIOC_STREAMON ENOSPC) korur.
+  enabled: true
+  base_host: 127.0.0.1        # MediaMTX Jetson'da calisir (RTSP push hedefi)
+  encoder: x264               # yazilim x264 (NVENC/rtspclientsink bu unitede yok)
+  # NOT: /dev/videoN numaralari USB yeniden-numaralandirmada kayabilir. Sabitlik
+  # icin ileride /dev/v4l/by-id/... yollarina gecmek daha saglam olur.
   cameras:
-    - name: front
+    - name: front             # kamera A (YUYV-only)
       device: /dev/video0
-      width: 1280
-      height: 720
+      input_format: yuyv422
+      width: 640
+      height: 480
       fps: 30
-      bitrate_kbps: 4000
-      rtp_port: 5000
-    - name: rear
-      device: /dev/video1
-      width: 1280
-      height: 720
+      bitrate_kbps: 1000
+      mode: drive
+    - name: rear              # kamera C (MJPEG)
+      device: /dev/video4
+      input_format: mjpeg
+      width: 640
+      height: 480
       fps: 30
-      bitrate_kbps: 4000
-      rtp_port: 5002
-    - name: turret
+      bitrate_kbps: 1000
+      mode: drive
+    - name: turret            # kamera B (MJPEG)
       device: /dev/video2
-      width: 1920
-      height: 1080
-      fps: 60
-      bitrate_kbps: 8000
-      rtp_port: 5004
+      input_format: mjpeg
+      width: 640
+      height: 480
+      fps: 30
+      bitrate_kbps: 1000
+      mode: laser
