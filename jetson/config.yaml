@@ -46,30 +46,38 @@ video:
   enabled: true
   base_host: 127.0.0.1        # MediaMTX Jetson'da calisir (RTSP push hedefi)
   encoder: x264               # yazilim x264 (NVENC/rtspclientsink bu unitede yok)
-  # NOT: /dev/videoN numaralari USB yeniden-numaralandirmada kayabilir. Sabitlik
-  # icin ileride /dev/v4l/by-id/... yollarina gecmek daha saglam olur.
+  # Cihazlar SABIT yollarla baglanir (videoN numaralari reboot/replug'da kayar):
+  #   - turret = C922 Pro : benzersiz seri -> by-id (hangi porta takilsa da bulunur)
+  #   - front/rear = iki C270 : AYNI serili (200901010001) -> by-id ayirt EDEMEZ,
+  #     bu yuzden by-path (fiziksel USB port) sart.
+  # SART: her kamerayi hep ayni USB portunda tut (C922->2.1, front C270->2.2,
+  # rear C270->2.4). Portu degistirirsen by-path eslemesi de degisir.
   cameras:
-    - name: front             # kamera A (YUYV-only)
-      device: /dev/video0
-      input_format: yuyv422
-      width: 640
-      height: 480
-      fps: 30
-      bitrate_kbps: 1000
-      mode: drive
-    - name: rear              # kamera C (MJPEG)
-      device: /dev/video4
-      input_format: mjpeg
-      width: 640
-      height: 480
-      fps: 30
-      bitrate_kbps: 1000
-      mode: drive
-    - name: turret            # kamera B (MJPEG)
-      device: /dev/video2
+    # TARET: en iyi kamera (C922 Pro). Lazer modunda tek basina yayinlandigi icin
+    # istenirse 720p'ye cikarilabilir (front/rear'i etkilemez).
+    - name: turret
+      device: /dev/v4l/by-id/usb-046d_C922_Pro_Stream_Webcam_6231597F-video-index0
       input_format: mjpeg
       width: 640
       height: 480
       fps: 30
       bitrate_kbps: 1000
       mode: laser
+    # ON: C270, USB port 2.2
+    - name: front
+      device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.2:1.0-video-index0
+      input_format: mjpeg
+      width: 640
+      height: 480
+      fps: 30
+      bitrate_kbps: 1000
+      mode: drive
+    # ARKA: C270, USB port 2.4
+    - name: rear
+      device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.4:1.0-video-index0
+      input_format: mjpeg
+      width: 640
+      height: 480
+      fps: 30
+      bitrate_kbps: 1000
+      mode: drive
