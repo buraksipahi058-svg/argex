@@ -3,22 +3,21 @@
 Jetson<->STM RX bring-up testi (SERI HAT, gercek donanim).
 
 STM'e COMMAND + HEARTBEAT gonderir ve STM'in geri yolladigi STATUS
-telemetrisindeki `jetson_link` bitini izler:
+telemetrisindeki `jetson_link` bitini 1 Hz canli izler:
     - Once ~3 sn SADECE dinler  -> jetson_link=False olmali (STM bizi duymuyor)
     - Sonra gondermeye baslar    -> jetson_link 500 ms icinde True olmali
 Boylece Jetson->STM yolu (PC7 = USART6_RX) + COMMAND parser dogrulanir.
 
-Kablolama (USB-TTL 3.3V <-> STM, CAPRAZ):
-    adapter GND -> STM GND
-    adapter TX  -> STM PC7   (USART6_RX)
-    adapter RX  -> STM PC6   (USART6_TX)
+Kablolama (CAPRAZ, 3.3V):
+    Jetson/adapter GND -> STM GND
+    Jetson/adapter TX  -> STM PC7   (USART6_RX)   <-- bu yeni yon; takili mi?
+    Jetson/adapter RX  -> STM PC6   (USART6_TX)
 
 Kullanim:
-    python sim/jetson_link_test.py COM7           # Windows USB-TTL
-    python sim/jetson_link_test.py /dev/ttyUSB0   # Linux/PC USB-TTL
-    python sim/jetson_link_test.py /dev/ttyTHS1   # Jetson dahili UART
+    python3 sim/jetson_link_test.py /dev/ttyTHS1   # Jetson dahili UART
+    python  sim/jetson_link_test.py COM7           # Windows USB-TTL
 
-Gereksinim:  pip install pyserial
+Gereksinim:  pip install pyserial  (Jetson: apt install python3-serial)
 """
 from __future__ import annotations
 
@@ -30,7 +29,7 @@ from pathlib import Path
 try:
     import serial  # pyserial
 except ImportError:  # pragma: no cover
-    raise SystemExit("pyserial gerekli:  pip install pyserial")
+    raise SystemExit("pyserial gerekli:  apt install python3-serial")
 
 # --- frozen protokol (needtocheck/jetson_parser.py) --------------------------
 _FROZEN = Path(__file__).resolve().parent.parent / "needtocheck" / "jetson_parser.py"
@@ -43,7 +42,7 @@ TYPE_STATUS = _p.TYPE_STATUS
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Jetson->STM RX bring-up testi")
-    ap.add_argument("port", help="seri port (COM7, /dev/ttyUSB0, /dev/ttyTHS1)")
+    ap.add_argument("port", help="seri port (/dev/ttyTHS1, COM7, /dev/ttyUSB0)")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--listen", type=float, default=3.0,
                     help="gondermeden once yalniz dinleme suresi (sn)")
@@ -57,39 +56,48 @@ def main() -> None:
 
     t0 = time.time()
     t_send = 0.0
+    t_report = t0
     sending = False
-    last_link = None
-    status_seen = 0
+    status_total = 0
+    status_prev = 0
+    last_status = None
 
     try:
         while True:
             now = time.time()
 
-            # 1) STM'den gelen telemetriyi coz, jetson_link degisimini bildir
+            # 1) STM'den gelen STATUS'lari coz (en sonuncuyu tut)
             for pkt in proto.feed(ser.read(256)):
                 if pkt["type"] == TYPE_STATUS:
-                    status_seen += 1
-                    s = pkt["status"]
-                    if s["jetson_link"] != last_link:
-                        print(f"[{now - t0:6.2f}s] STATUS  "
-                              f"jetson_link={s['jetson_link']!s:5}  "
-                              f"failsafe={s['failsafe']!s:5}  "
-                              f"durum=0x{s['durum']:02X}  "
-                              f"(STATUS x{status_seen}, kayip={proto.lost})")
-                        last_link = s["jetson_link"]
+                    status_total += 1
+                    last_status = pkt["status"]
 
-            # 2) Dinleme bitince COMMAND+HEARTBEAT gondermeye basla (10 Hz)
+            # 2) Dinleme bitince COMMAND + HEARTBEAT gonder (10 Hz)
             if not sending and (now - t0) >= args.listen:
                 sending = True
-                if status_seen == 0:
-                    print("[!] Hic STATUS gelmedi! Kontrol: PC6->adapter RX yonu, "
-                          "GND ortak mi, baud 115200 mi, firmware flash'landi mi.\n")
-                print(">>> COMMAND + HEARTBEAT gonderiliyor (10 Hz)... "
-                      "jetson_link True olmali\n")
+                print(">>> Artik COMMAND + HEARTBEAT gonderiliyor (10 Hz). "
+                      "jetson_link True olmali.\n")
             if sending and (now - t_send) >= 0.1:
                 t_send = now
                 ser.write(proto.build_heartbeat(uptime_ms=int((now - t0) * 1000)))
                 ser.write(proto.build_command(sol=0, sag=0, pan=90, tilt=90))
+
+            # 3) 1 Hz canli rapor
+            if now - t_report >= 1.0:
+                t_report = now
+                rate = status_total - status_prev
+                status_prev = status_total
+                phase = "GONDERIYOR" if sending else "dinliyor"
+                if last_status is None:
+                    print(f"[{now - t0:5.1f}s] STM'den STATUS YOK (+{rate}/s)  [{phase}]  "
+                          f"-> PC6->Jetson RX / GND / baud / firmware kontrol")
+                else:
+                    link = last_status["jetson_link"]
+                    mark = "   <== BASARILI (RX calisiyor)" if (sending and link) else ""
+                    print(f"[{now - t0:5.1f}s] STATUS +{rate}/s  "
+                          f"jetson_link={link!s:5}  "
+                          f"durum=0x{last_status['durum']:02X}  "
+                          f"kayip={proto.lost}  [{phase}]{mark}")
 
             time.sleep(0.005)
     except KeyboardInterrupt:
