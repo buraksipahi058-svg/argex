@@ -10,11 +10,16 @@
   *  Base station referansi (TEK GERCEK KAYNAK): needtocheck/jetson_parser.py
   *  Uretilen cerceveler o parser + sim/fake_stm.py ile BIREBIR ayni olmalidir.
   *
-  *  Bu firmware TEK YONLU telemetri gonderir (STM -> Jetson); komut ALMAZ.
-  *  Bu yuzden durum bitlerinden yalnizca ST_FAILSAFE uretilir; digerleri 0.
+  *  Bu firmware CIFT YONLUDUR:
+  *    - TX (STM -> Jetson): STATUS + HEARTBEAT telemetri
+  *    - RX (Jetson -> STM): COMMAND + HEARTBEAT  (DMA halka tampon + cozucu)
+  *  Gelen COMMAND dogrulanip JetsonKomut'a yazilir; bu SURUMDE surus/servo
+  *  kontroluna BAGLANMAZ (yalniz alinir ve tazeligi izlenir). Motora uygulama
+  *  (RC <-> AI arbitrasyonu) sonraki adimda main.c::Drive_Update'te yapilacak.
   *
-  *  DONANIM: bos olan USART6 kullanilir. TX = PC6 (AF8) @115200 8N1.
-  *           Sadece PC6 -> Jetson RX + GND kablolanir (RX kullanilmaz).
+  *  DONANIM: bos olan USART6 kullanilir, full-duplex @115200 8N1.
+  *           TX = PC6 (AF8) -> Jetson RX ,  RX = PC7 (AF8) <- Jetson TX , GND ortak.
+  *           RX yolu: DMA2 Stream1 Kanal5 (dairesel).
   ******************************************************************************
   */
 
@@ -23,6 +28,7 @@
 
 #include "stm32f4xx_hal.h"
 #include <stdint.h>
+#include <stdbool.h>
 
 /* ---- Cerceve sabitleri ---------------------------------------------------- */
 #define PROTO_HDR0          0xAAU
@@ -32,16 +38,25 @@
 
 /* ---- Paket tipleri -------------------------------------------------------- */
 #define TYPE_STATUS         0x01U   /* STM -> Jetson */
-#define TYPE_COMMAND        0x02U   /* Jetson -> STM (bu firmware kullanmaz) */
+#define TYPE_COMMAND        0x02U   /* Jetson -> STM (bu firmware ARTIK cozer)  */
 #define TYPE_HEARTBEAT      0x03U   /* cift yonlu */
+/* 0x04 ACK, 0x05 CONFIG, 0x06 LOG rezerve; 0x07 = IMU (sonraki adim) */
 
 /* ---- Heartbeat kaynak alani ----------------------------------------------- */
 #define HB_KAYNAK_STM       0x00U
 #define HB_KAYNAK_JETSON    0x01U
 
+/* ---- COMMAND bayrak bitleri (COMMAND payload byte 6) ---------------------- */
+#define CMD_FLAG_AUTO_REQ   0x01U   /* Jetson otonom kontrol istiyor */
+
+/* ---- Mod komutu ozel degeri ----------------------------------------------- */
+#define MOD_KOMUT_DEGISTIRME 0xFFU  /* Jetson modu degistirmek istemiyor */
+
 /* ---- Zamanlama (ms) ------------------------------------------------------- */
 #define STATUS_PERIOD_MS    50U     /* 20 Hz telemetri */
 #define HB_PERIOD_MS        100U    /* 10 Hz heartbeat */
+#define CMD_TIMEOUT_MS      200U    /* COMMAND bu sureden eskiyse bayat */
+#define JETSON_HB_TIMEOUT_MS 500U   /* Jetson linki bu sureden sessizse kopuk */
 
 /* ---- STATUS durum bayragi bitleri (payload byte 7) ------------------------ */
 #define ST_JETSON_LINK      0x01U   /* Jetson linki taze  (bu firmware: 0) */
@@ -52,6 +67,7 @@
 
 /* ---- Telemetri UART ayarlari ---------------------------------------------- */
 #define HABERLESME_BAUD     115200U
+#define HABERLESME_RX_BUF   256U    /* Jetson->STM DMA dairesel tampon boyutu */
 
 /* STM'nin uygulanmis durumu (telemetriye gonderilir) */
 typedef struct
@@ -66,8 +82,23 @@ typedef struct
     uint8_t  durum;      /* ST_* bitfield */
 } VehicleState;
 
+/* Jetson'dan gelen son dogrulanmis COMMAND. Surus katmanina ACIK; bu surumde
+   yalnizca doldurulur, motorlara/servolara UYGULANMAZ (arbitrasyon sonraki adim). */
+typedef struct
+{
+    int8_t   solHedef;   /* -100..100 */
+    int8_t   sagHedef;   /* -100..100 */
+    uint8_t  panHedef;   /* 0..180 */
+    uint8_t  tiltHedef;  /* 0..180 */
+    uint8_t  lazerKomut; /* 0/1 */
+    uint8_t  modKomut;   /* 0/1 veya MOD_KOMUT_DEGISTIRME (0xFF) */
+    uint8_t  bayrak;     /* CMD_FLAG_* */
+    uint32_t sonAlim;    /* son gecerli COMMAND zamani (HAL_GetTick) */
+} JetsonKomut;
+
 /**
-  * @brief USART6 (PC6, TX-only) donanimini kurar ve SEQ sayacini sifirlar.
+  * @brief USART6 full-duplex (PC6 TX / PC7 RX) donanimini kurar, RX DMA'yi
+  *        baslatir ve tum sayaclari/durum makinesini sifirlar.
   */
 void Haberlesme_Init(void);
 
@@ -86,5 +117,46 @@ void Haberlesme_SendHeartbeat(uint32_t uptime_ms);
   * @brief CRC-16/CCITT-FALSE (Jetson tarafiyla ayni; test icin acik).
   */
 uint16_t Haberlesme_Crc16(const uint8_t *data, uint16_t len);
+
+/* ==========================================================================
+ *  RX yolu (Jetson -> STM):  COMMAND + HEARTBEAT cozucu
+ * ========================================================================== */
+
+/**
+  * @brief USART6 RX DMA dairesel tamponunu bosaltip gelen cerceveleri cozer.
+  *        Ana dongude her spin (CRSF_PumpDMA gibi, non-blocking) cagirin.
+  * @param now_ms  HAL_GetTick() — tazelik ve paket-kaybi zaman damgalari icin.
+  */
+void Haberlesme_Poll(uint32_t now_ms);
+
+/**
+  * @brief Son dogrulanmis Jetson komutuna salt-okunur erisim.
+  */
+const JetsonKomut *Haberlesme_GetKomut(void);
+
+/**
+  * @brief COMMAND <= CMD_TIMEOUT_MS icinde mi geldi (taze mi).
+  */
+bool Haberlesme_KomutTaze(uint32_t now_ms);
+
+/**
+  * @brief Jetson paketi (COMMAND/HEARTBEAT) <= JETSON_HB_TIMEOUT_MS icinde mi.
+  */
+bool Haberlesme_JetsonLinkTaze(uint32_t now_ms);
+
+/**
+  * @brief SEQ atlamalarindan tespit edilen toplam paket kaybi.
+  */
+uint16_t Haberlesme_Kayip(void);
+
+/**
+  * @brief Son CRC hata bayragini okuyup temizler.
+  */
+bool Haberlesme_CrcHata(void);
+
+/**
+  * @brief DMA2 Stream1 (USART6 RX) kesme kancasi — stm32f4xx_it.c'den cagrilir.
+  */
+void Haberlesme_DmaRxIrq(void);
 
 #endif /* HABERLESME_H */

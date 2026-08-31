@@ -192,6 +192,12 @@ int main(void)
         CRSF_PumpDMA();
 
         uint32_t now = HAL_GetTick();
+
+        /* 1b) Jetson -> STM COMMAND/HEARTBEAT: DMA tamponunu her spin bosalt
+               (non-blocking). Gelen komut JetsonKomut'a yazilir; bu surumde
+               henuz surus/servoya UYGULANMAZ (arbitrasyon sonraki adim). */
+        Haberlesme_Poll(now);
+
         if ((now - last_loop) < LOOP_PERIOD_MS)
         {
             continue;
@@ -435,7 +441,13 @@ static void Telemetry_Update(uint32_t now_ms, uint8_t link_ok)
         st.lazer    = g_fire_on;                        /* CH10 atesleme durumu (PE1) */
         st.aktifMod = g_laser_mode;                     /* 0 = surus, 1 = lazer modu */
         st.elrsLink = link_ok ? 1U : 0U;
-        st.durum    = link_ok ? 0U : ST_FAILSAFE;       /* diger bitler bu firmware'de 0 */
+
+        /* durum bitleri: FAILSAFE (CRSF yok) + JETSON_LINK (Jetson paketi taze).
+           NOT: ST_CMD_TIMEOUT / ST_AUTO_EN gercek otonom surus baglandiginda
+           (Drive_Update arbitrasyonu, sonraki adim) doldurulacak; simdilik 0. */
+        uint8_t durum = link_ok ? 0U : ST_FAILSAFE;
+        if (Haberlesme_JetsonLinkTaze(now_ms)) { durum |= ST_JETSON_LINK; }
+        st.durum    = durum;
         Haberlesme_SendStatus(&st);
     }
 

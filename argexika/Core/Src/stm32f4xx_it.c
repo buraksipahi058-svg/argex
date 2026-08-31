@@ -22,6 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "haberlesme.h"   /* Haberlesme_DmaRxIrq() (USART6 RX DMA kancasi) */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -213,5 +214,11 @@ void DMA1_Stream5_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-
+/**
+  * @brief This function handles DMA2 stream1 global interrupt (USART6 RX).
+  */
+void DMA2_Stream1_IRQHandler(void)
+{
+  Haberlesme_DmaRxIrq();   /* -> HAL_DMA_IRQHandler(&s_hdma_rx) */
+}
 /* USER CODE END 1 */
