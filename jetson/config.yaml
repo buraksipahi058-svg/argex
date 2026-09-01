@@ -16,8 +16,11 @@ source:
   type: serial
 
   # --- serial source (real hardware) ---
-  serial_port: /dev/ttyTHS1
-  serial_baud: 115200          # matches haberlesme.cpp (do not change)
+  # Nucleo-F072RB, Jetson'a ST-Link USB'siyle baglanir -> Jetson'da USB-CDC (ttyACM).
+  # ttyACMx numarasi replug'da kayabilir; sabitlemek icin by-id yolunu tercih et:
+  #   /dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_*-if02
+  serial_port: /dev/ttyACM0
+  serial_baud: 115200          # Nucleo USART2 (PA2/PA3, ST-Link VCP) ile ayni olmali
 
   # --- udp source (sim / IPC tap) ---
   udp_host: 127.0.0.1
