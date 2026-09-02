@@ -40,7 +40,8 @@ TIM4 1 MHz'e ayarlı (PSC=84-1), ARR=20000-1 → 50 Hz. CCR değeri doğrudan mi
 
 | Pin | Yön | İşlev | Aktif durum |
 |---|---|---|---|
-| **PE0** | Çıkış | Reactor **EN** (enable / röle) | ARM'lı ve link varken HIGH |
+| **PE0** | Çıkış | Reactor **EN** (enable / röle) | Manuel/otonom sürüşte kontrol geçerliyken HIGH; lazer/E-STOP/failsafe'te LOW |
+| **PE1** | Çıkış | **Lazer ateşleme** | Lazer modu + CH10 tetikte HIGH (aksi LOW) |
 | **PD14** | Çıkış | **Kırmızı LED** = FAILSAFE | Link **yok** iken yanar |
 | **PD15** | Çıkış | **Mavi LED** = LINK OK | Link **var** iken yanar |
 
@@ -48,15 +49,28 @@ TIM4 1 MHz'e ayarlı (PSC=84-1), ARR=20000-1 → 50 Hz. CCR değeri doğrudan mi
 
 ## 4. Kumanda kanalları (CRSF, 1-tabanlı)
 
-| Kanal | Fonksiyon | Açıklama |
-|---|---|---|
-| **CH1** | STEER (dönüş) | Tank-mix dönüş ekseni |
-| **CH2** | THROTTLE (ileri/geri) | Tank-mix ileri/geri |
-| **CH3** | TILT | Dikey eksen servo |
-| **CH4** | PAN | Yatay eksen servo |
-| **CH5** | ARM | **>1700 µs = motorlar aktif** (altında motorlar durur) |
-| **CH6** | HIZ LİMİTİ | 3 pozisyon: düşük (%30) / orta (%60) / yüksek (%100) |
-| **CH7** | TARET MERKEZ | **>1700 µs = pan/tilt merkeze döner** |
+> **CH1/CH2 PAYLAŞIMLI:** sürüş modunda motor (dönüş/gaz), lazer modunda taret
+> (pan/tilt). Lazer modunda motorlar kilitlendiği için aynı stickler taret için
+> kullanılır.
+
+| Kanal | Sürüş modu | Lazer modu | Eşik (µs) |
+|---|---|---|---|
+| **CH1** | STEER (dönüş) | **PAN** servo | stick |
+| **CH2** | THROTTLE (ileri/geri) | **TILT** servo | stick |
+| CH3, CH4 | — (kullanılmıyor) | — | — |
+| **CH5** | **MANUEL / OTONOM** seçici | — | **>1500 = OTONOM** |
+| **CH6** | HIZ LİMİTİ (3 poz %30/%60/%100) | — | — |
+| **CH7** | — | **LAZER modu aç** (motorlar kilitlenir) | **>1700 = LAZER** |
+| **CH9** | **FAILSAFE** buton → kilitli E-STOP | aynı | **>1500 = basılı** |
+| **CH10** | — | **ATEŞ** | **>1700 = ateş** |
+
+- **Öncelik:** CH7 (lazer) > CH5 (manuel/otonom). Lazer açıkken motorlar durur,
+  otonom devre dışı kalır.
+- **E-STOP:** CH9 anlık butona bir kez basınca motor + lazer **anında durur ve
+  KİLİTLENİR**. Reset: butonu bırak **ve** CH5'i **MANUEL** konuma al.
+- **Otonom sürüş:** şu an yalnız mod bayrağı gönderilir, motorlar **durur**
+  (`main.c` → `AUTO_DRIVE_ENABLED 0`). Jetson sürüş kodu hazır olunca `1` yapılınca
+  `solHedef/sagHedef` motorlara uygulanır (AUTO_REQ + taze komut el sıkışmasıyla).
 
 ---
 

@@ -36,16 +36,26 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* --- Kanal atamalari --- */
-#define CH_STEER            1U      /* donus */
-#define CH_THROTTLE         2U      /* ileri/geri */
-#define CH_TILT             3U      /* dikey eksen servo */
-#define CH_PAN              4U      /* yatay eksen servo */
-#define CH_ARM              5U      /* silahlandirma anahtari (armed=SURUS, disarmed=LAZER) */
-#define CH_SPEED_MODE       6U      /* 3 pozisyon hiz limiti */
-#define CH_TURRET_CENTER    7U      /* servolari merkeze al */
+/* --- Kanal atamalari ---
+ * CH1/CH2 PAYLASIMLI: SURUS modunda motor (donus/gaz), LAZER modunda taret (pan/tilt).
+ * Lazer modunda motorlar kilitli oldugu icin ayni stickler taret icin kullanilir. */
+#define CH_STEER            1U      /* SURUS: donus      | LAZER: PAN servo  */
+#define CH_THROTTLE         2U      /* SURUS: ileri/geri | LAZER: TILT servo */
+/* CH3, CH4 artik kullanilmiyor (taret CH1/CH2'ye tasindi) */
+#define CH_OP_MODE          5U      /* operasyon: <esik = MANUEL, >esik = OTONOM */
+#define CH_SPEED_MODE       6U      /* 3 pozisyon hiz limiti (yalniz manuel surus) */
+#define CH_LASER            7U      /* >esik = LAZER modu acik (motorlar kilitlenir) */
+#define CH_ESTOP            9U      /* FAILSAFE anlik buton -> kilitli E-STOP */
 #define CH_FIRE             10U     /* lazer atesleme tetigi (yalniz LAZER modu) */
+
+#define OP_AUTO_THRESH_US   1500U   /* CH5 bu ustunde -> OTONOM */
+#define LASER_ON_THRESH_US  1700U   /* CH7 bu ustunde -> LAZER modu */
+#define ESTOP_THRESH_US     1500U   /* CH9 bu ustunde -> buton basili */
 #define FIRE_THRESH_US      1700U   /* CH10 bu esigin ustunde -> ates */
+
+/* Otonom surus (Jetson->motor) yolu. 0 iken OTONOM moda gecilir ama motorlar
+ * DURUR (yalniz mod bayragi gonderilir); Jetson surus kodu hazir olunca 1 yap. */
+#define AUTO_DRIVE_ENABLED  0
 
 /* --- Surus davranisi --- */
 #define STICK_DEADBAND_US   25U     /* stick merkez olu bandi */
@@ -110,9 +120,11 @@ static uint16_t  g_rx_tail = 0;
 static int16_t   g_applied_left  = 0;
 static int16_t   g_applied_right = 0;
 
-/* Lazer/ates durumu (telemetri + PE1 cikisi). */
-static uint8_t   g_laser_mode = 0;   /* 0 = surus, 1 = lazer modu (CH5 disarmed) */
-static uint8_t   g_fire_on    = 0;   /* 0/1 lazer atesleme cikisi (PE1) */
+/* Mod/durum (Control_Decide her dongu gunceller). */
+static uint8_t   g_laser_mode  = 0;  /* 0 = surus, 1 = lazer modu (CH7) */
+static uint8_t   g_auto_active = 0;  /* 0 = manuel, 1 = otonom (CH5) -> telemetri ST_AUTO_EN */
+static uint8_t   g_estop       = 0;  /* 1 = kilitli acil durdurma (CH9 buton) */
+static uint8_t   g_fire_on     = 0;  /* 0/1 lazer atesleme cikisi (PE1) */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -125,6 +137,7 @@ static void MX_USART1_UART_Init(void);
 static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
 static void CRSF_PumpDMA(void);
+static void Control_Decide(uint32_t now_ms, uint8_t link_ok);
 static void Drive_Update(uint32_t now_ms, uint8_t link_ok);
 static void Turret_Update(uint32_t now_ms, uint8_t link_ok);
 static void Laser_Update(uint32_t now_ms, uint8_t link_ok);
@@ -226,7 +239,8 @@ int main(void)
     /* 2) Baglanti durumu */
     uint8_t link_ok = CRSF_IsLinkUp(&g_crsf, now, CRSF_TIMEOUT_MS) ? 1U : 0U;
 
-    /* 3) Cikislari guncelle */
+    /* 3) Once mod/E-STOP karari, sonra cikislari guncelle */
+    Control_Decide(now, link_ok);
     Drive_Update(now, link_ok);
     Turret_Update(now, link_ok);
     Laser_Update(now, link_ok);
@@ -547,49 +561,112 @@ static void CRSF_PumpDMA(void)
 }
 
 /* ==========================================================================
+ *  MOD / E-STOP KARARI
+ *   - CH9 anlik buton -> kilitli E-STOP (bir bas: her sey durur+kilitlenir;
+ *     reset: butonu birak + CH5'i MANUEL konuma al = operator kontrolu geri aldi)
+ *   - CH7 > esik  -> LAZER modu (ONCELIKLI; motorlar kilitlenir)
+ *   - CH5 > esik  -> OTONOM, degilse MANUEL (yalniz lazer kapaliyken gecerli)
+ *  Sonuc: g_estop / g_laser_mode / g_auto_active. Uygulama Drive/Turret/Laser
+ *  _Update icinde bu bayraklara gore yapilir.
+ * ========================================================================== */
+static void Control_Decide(uint32_t now_ms, uint8_t link_ok)
+{
+    (void)now_ms;
+    static uint8_t prev_btn = 0U;
+
+    /* Link yoksa: mod bayraklari guvenli varsayilana. E-STOP mandali korunur
+       (link donunce buton hala basiliysa yeniden tetiklenir). */
+    if (!link_ok)
+    {
+        g_laser_mode  = 0U;
+        g_auto_active = 0U;
+        prev_btn      = 0U;
+        return;
+    }
+
+    /* --- E-STOP: anlik butonun YUKSELEN kenari mandalliyor --- */
+    uint8_t btn = (CRSF_GetChannelUs(&g_crsf, CH_ESTOP) > ESTOP_THRESH_US) ? 1U : 0U;
+    if (btn && !prev_btn) { g_estop = 1U; }
+    prev_btn = btn;
+
+    uint8_t laser_on = (CRSF_GetChannelUs(&g_crsf, CH_LASER)   > LASER_ON_THRESH_US) ? 1U : 0U;
+    uint8_t auto_on  = (CRSF_GetChannelUs(&g_crsf, CH_OP_MODE) > OP_AUTO_THRESH_US)  ? 1U : 0U;
+
+    /* Reset: buton birakildi VE CH5 MANUEL konumda */
+    if (g_estop && !btn && !auto_on) { g_estop = 0U; }
+
+    /* Oncelik: LAZER (CH7) > operasyon (CH5). Lazer acikken otonom devre disi. */
+    g_laser_mode  = laser_on;
+    g_auto_active = (!laser_on && auto_on) ? 1U : 0U;
+}
+
+/* ==========================================================================
  *  SURUS: tank (skid-steer) mix -> iki Reactor surucusu
+ *   Motorlar YALNIZ manuel/otonom surus + gecerli kontrol varken doner.
+ *   FAILSAFE(link) | E-STOP | LAZER modu -> her durumda DUR.
  * ========================================================================== */
 static void Drive_Update(uint32_t now_ms, uint8_t link_ok)
 {
-    (void)now_ms;
-
-    /* --- FAILSAFE: sinyal yok -> her sey dursun --- */
-    if (!link_ok)
+    /* --- Motor DUR sartlari: sinyal yok, acil durdurma, veya lazer modu --- */
+    if (!link_ok || g_estop || g_laser_mode)
     {
+        Reactor_Stop(&g_left);
+        Reactor_Stop(&g_right);
+        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_0, GPIO_PIN_RESET);   /* EN pasif */
+        g_applied_left  = 0;
+        g_applied_right = 0;
+        return;
+    }
+
+    /* --- OTONOM modu --- */
+    if (g_auto_active)
+    {
+#if AUTO_DRIVE_ENABLED
+        /* Jetson hedeflerini uygula (yalniz gecerli el sikismasinda) */
+        const JetsonKomut *k = Haberlesme_GetKomut();
+        uint8_t auto_ok = (k->bayrak & CMD_FLAG_AUTO_REQ)
+                          && Haberlesme_KomutTaze(now_ms)
+                          && Haberlesme_JetsonLinkTaze(now_ms);
+        if (auto_ok)
+        {
+            int32_t l = (int32_t)k->solHedef * 10;   /* -100..100 -> -1000..1000 */
+            int32_t r = (int32_t)k->sagHedef * 10;
+            if (l >  1000) { l =  1000; } if (l < -1000) { l = -1000; }
+            if (r >  1000) { r =  1000; } if (r < -1000) { r = -1000; }
+            Reactor_SetSpeed(&g_left,  (int16_t)l, (int16_t)l);
+            Reactor_SetSpeed(&g_right, (int16_t)r, (int16_t)r);
+            HAL_GPIO_WritePin(GPIOE, GPIO_PIN_0, GPIO_PIN_SET);
+            g_applied_left  = (int16_t)l;
+            g_applied_right = (int16_t)r;
+            return;
+        }
+#else
+        (void)now_ms;
+#endif
+        /* Jetson surusu hazir/gecerli degil -> guvenli DUR (mod yine OTONOM) */
         Reactor_Stop(&g_left);
         Reactor_Stop(&g_right);
         HAL_GPIO_WritePin(GPIOE, GPIO_PIN_0, GPIO_PIN_RESET);
-        g_applied_left  = 0;   /* telemetri: motorlar durdu */
+        g_applied_left  = 0;
         g_applied_right = 0;
         return;
     }
 
-    /* --- ARM anahtari --- */
-    uint8_t armed = (CRSF_GetChannelUs(&g_crsf, CH_ARM) > 1700U) ? 1U : 0U;
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_0, armed ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    /* --- MANUEL surus: RC stickleri (CH1 donus, CH2 gaz) --- */
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_0, GPIO_PIN_SET);   /* EN aktif */
 
-    if (!armed)
-    {
-        Reactor_Stop(&g_left);
-        Reactor_Stop(&g_right);
-        g_applied_left  = 0;   /* telemetri: silahsiz -> motorlar durdu */
-        g_applied_right = 0;
-        return;
-    }
-
-    /* --- Hiz limiti (CH6, 3 pozisyonlu anahtar) --- */
+    /* Hiz limiti (CH6, 3 pozisyonlu anahtar) */
     uint16_t sp_us   = CRSF_GetChannelUs(&g_crsf, CH_SPEED_MODE);
     int32_t  max_pct = DRIVE_MAX_PCT_LOW;
     if      (sp_us > 1700U) { max_pct = DRIVE_MAX_PCT_HIGH; }
     else if (sp_us > 1300U) { max_pct = DRIVE_MAX_PCT_MID;  }
 
-    /* --- Stickler --- */
     int32_t thr = CRSF_GetChannelNorm(&g_crsf, CH_THROTTLE, STICK_DEADBAND_US);
     int32_t str = CRSF_GetChannelNorm(&g_crsf, CH_STEER,    STICK_DEADBAND_US);
 
     str = (str * TURN_GAIN_PCT) / 100;
 
-    /* --- Tank mix --- */
+    /* Tank mix */
     int32_t left  = thr + str;
     int32_t right = thr - str;
 
@@ -603,42 +680,34 @@ static void Drive_Update(uint32_t now_ms, uint8_t link_ok)
         right = (right * 1000) / peak;
     }
 
-    /* --- Hiz limitini uygula --- */
     left  = (left  * max_pct) / 100;
     right = (right * max_pct) / 100;
 
-    /* Sol surucunun HER IKI kanali sol paletin motorlarini,
-       sag surucununkiler sag paletin motorlarini surer. */
     Reactor_SetSpeed(&g_left,  (int16_t)left,  (int16_t)left);
     Reactor_SetSpeed(&g_right, (int16_t)right, (int16_t)right);
 
-    g_applied_left  = (int16_t)left;    /* telemetri: uygulanan hizlar */
+    g_applied_left  = (int16_t)left;
     g_applied_right = (int16_t)right;
 }
 
 /* ==========================================================================
  *  TARET: pan (yatay) / tilt (dikey) servolari
+ *   Taret YALNIZ lazer modunda kumanda edilir; stickler CH1 (pan) / CH2 (tilt).
+ *   Diger modlarda (surus) servolar SON KONUMDA kalir. Lazerde motorlar zaten
+ *   kilitli oldugu icin ayni CH1/CH2 stickleri taret icin kullanilir.
  * ========================================================================== */
 static void Turret_Update(uint32_t now_ms, uint8_t link_ok)
 {
     (void)now_ms;
 
-    /* Sinyal yoksa servolar SON KONUMDA kalir (taret sarsilmasin) */
-    if (!link_ok)
+    /* Lazer modu disinda, link yokken veya E-STOP'ta servolar son konumda kalir */
+    if (!link_ok || g_estop || !g_laser_mode)
     {
         return;
     }
 
-    /* Merkeze donus anahtari */
-    if (CRSF_GetChannelUs(&g_crsf, CH_TURRET_CENTER) > 1700U)
-    {
-        Servo_SetUs(&g_pan,  PAN_CENTER_US);
-        Servo_SetUs(&g_tilt, TILT_CENTER_US);
-        return;
-    }
-
-    int32_t pan_in  = CRSF_GetChannelNorm(&g_crsf, CH_PAN,  STICK_DEADBAND_US);
-    int32_t tilt_in = CRSF_GetChannelNorm(&g_crsf, CH_TILT, STICK_DEADBAND_US);
+    int32_t pan_in  = CRSF_GetChannelNorm(&g_crsf, CH_STEER,    STICK_DEADBAND_US); /* CH1 */
+    int32_t tilt_in = CRSF_GetChannelNorm(&g_crsf, CH_THROTTLE, STICK_DEADBAND_US); /* CH2 */
 
     /* --- PAN --- */
 #if PAN_RATE_MODE
@@ -659,35 +728,22 @@ static void Turret_Update(uint32_t now_ms, uint8_t link_ok)
 }
 
 /* ==========================================================================
- *  LAZER / ATES: CH5 disarmed -> LAZER modu; CH10 -> atesleme (PE1)
+ *  LAZER ATES: yalniz LAZER modunda (CH7) CH10 tetigi ile PE1 -> HIGH.
+ *   Mod karari Control_Decide'da verilir; burada sadece atesleme uygulanir.
+ *   Lazer modu disinda / E-STOP / link yok -> ates kapali.
  * ========================================================================== */
 static void Laser_Update(uint32_t now_ms, uint8_t link_ok)
 {
     (void)now_ms;
 
-    /* FAILSAFE: her sey guvenli tarafa */
-    if (!link_ok)
+    if (!link_ok || g_estop || !g_laser_mode)
     {
         HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
-        g_fire_on    = 0U;
-        g_laser_mode = 0U;
-        return;
-    }
-
-    /* ARM anahtari: armed -> SURUS, disarmed -> LAZER */
-    uint8_t armed = (CRSF_GetChannelUs(&g_crsf, CH_ARM) > 1700U) ? 1U : 0U;
-
-    if (armed)
-    {
-        /* SURUS modu: atesleme kilitli */
-        g_laser_mode = 0U;
-        g_fire_on    = 0U;
-        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
+        g_fire_on = 0U;
         return;
     }
 
     /* LAZER modu: CH10 tetigi ile atesle */
-    g_laser_mode = 1U;
     uint8_t fire = (CRSF_GetChannelUs(&g_crsf, CH_FIRE) > FIRE_THRESH_US) ? 1U : 0U;
     g_fire_on    = fire;
     HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, fire ? GPIO_PIN_SET : GPIO_PIN_RESET);
@@ -727,6 +783,8 @@ static void Telemetry_Update(uint32_t now_ms, uint8_t link_ok)
         st.elrsLink = link_ok ? 1U : 0U;
 
         uint8_t durum = link_ok ? 0U : ST_FAILSAFE;
+        if (g_estop)       { durum |= ST_FAILSAFE; }   /* E-STOP da FAILSAFE gorunur */
+        if (g_auto_active) { durum |= ST_AUTO_EN;  }   /* otonom aktif */
         if (Haberlesme_JetsonLinkTaze(now_ms)) { durum |= ST_JETSON_LINK; }
         st.durum    = durum;
         Haberlesme_SendStatus(&st);
