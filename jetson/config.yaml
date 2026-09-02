@@ -16,8 +16,11 @@ source:
   type: serial
 
   # --- serial source (real hardware) ---
-  serial_port: /dev/ttyTHS1
-  serial_baud: 115200          # matches haberlesme.cpp (do not change)
+  # F407 native USB-CDC (Virtual COM Port), PA11/PA12. Jetson'da /dev/ttyACM* olur;
+  # ttyACM numarasi replug'da kayar -> cihaza-ozel by-id yolu kullan (sabit kalir).
+  # (Eski UART yolu: /dev/ttyTHS1 @115200; firmware artik USB-CDC gonderiyor.)
+  serial_port: /dev/serial/by-id/usb-STMicroelectronics_STM32_Virtual_ComPort_367D34503235-if00
+  serial_baud: 115200          # USB-CDC baud'u yok sayar; pyserial icin deger sart
 
   # --- udp source (sim / IPC tap) ---
   udp_host: 127.0.0.1
