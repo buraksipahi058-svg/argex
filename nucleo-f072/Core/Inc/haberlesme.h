@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file    haberlesme.h
-  * @brief   STM32 <-> Jetson ikili UART protokolu (HAL/C - F072 portu)
+  * @brief   STM32 -> Jetson ikili UART telemetri protokolu (HAL/C portu)
   *
   *  Cerceve:  AA 55 | VERSION | TYPE | LENGTH | SEQ | PAYLOAD | CRC_L CRC_H
   *   - Cok baytli alanlar LITTLE-ENDIAN
@@ -9,14 +9,20 @@
   *
   *  Base station referansi (TEK GERCEK KAYNAK): needtocheck/jetson_parser.py
   *  Uretilen cerceveler o parser + sim/fake_stm.py ile BIREBIR ayni olmalidir.
-  *  (Protokol degismedi; sadece altindaki UART/DMA donanimi F072'ye tasindi.)
   *
-  *  DONANIM (F072/Nucleo):
-  *    USART2 full-duplex @115200 8N1  <-> Nucleo ST-Link Virtual COM Port (VCP)
-  *      TX = PA2 (AF1) ,  RX = PA3 (AF1)  (Nucleo'da SB ile ST-Link'e bagli)
-  *    Jetson, Nucleo'nun ST-Link USB'sini gorur -> /dev/ttyACM* (USB-CDC).
-  *    RX yolu: DMA1 Channel5 (USART2_RX), dairesel.
-  *    IRQ: DMA1_Channel4_5_6_7_IRQn -> Haberlesme_DmaRxIrq().
+  *  Bu firmware CIFT YONLUDUR:
+  *    - TX (STM -> Jetson): STATUS + HEARTBEAT telemetri
+  *    - RX (Jetson -> STM): COMMAND + HEARTBEAT  (halka tampon + cozucu)
+  *  Gelen COMMAND dogrulanip JetsonKomut'a yazilir; bu SURUMDE surus/servo
+  *  kontroluna BAGLANMAZ (yalniz alinir ve tazeligi izlenir). Motora uygulama
+  *  (RC <-> AI arbitrasyonu) sonraki adimda main.c::Drive_Update'te yapilacak.
+  *
+  *  DONANIM: native USB Full-Speed CDC (Virtual COM Port), F072 USB device IP.
+  *           PA11 = USB_DM , PA12 = USB_DP.  Jetson'da /dev/ttyACM* olarak gorunur.
+  *           TX -> CDC_Transmit_FS ; RX -> CDC_Receive_FS (USB IRQ) gelen baytlari
+  *           halka tampona yazar, Haberlesme_Poll() ana donguda bosaltir.
+  *           (F407 surumu ayni transport'u OTG_FS ile yapiyordu; onun oncesi
+  *            USART6 PC6/PC7 + DMA2 Stream1 idi.)
   ******************************************************************************
   */
 
@@ -35,8 +41,9 @@
 
 /* ---- Paket tipleri -------------------------------------------------------- */
 #define TYPE_STATUS         0x01U   /* STM -> Jetson */
-#define TYPE_COMMAND        0x02U   /* Jetson -> STM (bu firmware cozer) */
+#define TYPE_COMMAND        0x02U   /* Jetson -> STM (bu firmware ARTIK cozer)  */
 #define TYPE_HEARTBEAT      0x03U   /* cift yonlu */
+/* 0x04 ACK, 0x05 CONFIG, 0x06 LOG rezerve; 0x07 = IMU (sonraki adim) */
 
 /* ---- Heartbeat kaynak alani ----------------------------------------------- */
 #define HB_KAYNAK_STM       0x00U
@@ -55,11 +62,11 @@
 #define JETSON_HB_TIMEOUT_MS 500U   /* Jetson linki bu sureden sessizse kopuk */
 
 /* ---- STATUS durum bayragi bitleri (payload byte 7) ------------------------ */
-#define ST_JETSON_LINK      0x01U
-#define ST_CMD_TIMEOUT      0x02U
-#define ST_AUTO_EN          0x04U
-#define ST_FAILSAFE         0x08U
-#define ST_CRC_ERR          0x10U
+#define ST_JETSON_LINK      0x01U   /* Jetson linki taze  (bu firmware: 0) */
+#define ST_CMD_TIMEOUT      0x02U   /* otonom komut bayat (bu firmware: 0) */
+#define ST_AUTO_EN          0x04U   /* otonom kontrol aktif (bu firmware: 0) */
+#define ST_FAILSAFE         0x08U   /* guvenlik motorlari durdurdu */
+#define ST_CRC_ERR          0x10U   /* yakin zamanda CRC hatasi (bu firmware: 0) */
 
 /* ---- Telemetri UART ayarlari ---------------------------------------------- */
 #define HABERLESME_BAUD     115200U
@@ -73,12 +80,13 @@ typedef struct
     uint8_t  pan;        /* 0..180 derece */
     uint8_t  tilt;       /* 0..180 derece */
     uint8_t  lazer;      /* 0/1 */
-    uint8_t  aktifMod;   /* 0=surus, 1=lazer */
+    uint8_t  aktifMod;   /* 0=surus */
     uint8_t  elrsLink;   /* 0/1 (CRSF link durumu) */
     uint8_t  durum;      /* ST_* bitfield */
 } VehicleState;
 
-/* Jetson'dan gelen son dogrulanmis COMMAND. */
+/* Jetson'dan gelen son dogrulanmis COMMAND. Surus katmanina ACIK; bu surumde
+   yalnizca doldurulur, motorlara/servolara UYGULANMAZ (arbitrasyon sonraki adim). */
 typedef struct
 {
     int8_t   solHedef;   /* -100..100 */
@@ -92,44 +100,74 @@ typedef struct
 } JetsonKomut;
 
 /**
-  * @brief USART2 full-duplex (PA2 TX / PA3 RX) donanimini kurar, RX DMA'yi
-  *        (DMA1 Ch5) baslatir ve tum sayaclari/durum makinesini sifirlar.
+  * @brief Protokol durum makinesini/sayaclarini ve RX halka tamponunu sifirlar.
+  *        USB (CDC) main icinde MX_USB_DEVICE_Init() ile ayrica baslatilir;
+  *        bu fonksiyon donanim kurmaz (USB-CDC'de gerekmez).
   */
 void Haberlesme_Init(void);
 
-/** @brief STATUS paketi gonderir (20 Hz cagirilmali). */
+/**
+  * @brief STATUS paketi gonderir (20 Hz cagirilmali).
+  */
 void Haberlesme_SendStatus(const VehicleState *s);
 
-/** @brief STM HEARTBEAT paketi gonderir (10 Hz cagirilmali). */
+/**
+  * @brief STM HEARTBEAT paketi gonderir (10 Hz cagirilmali).
+  * @param uptime_ms  Acilistan bu yana gecen ms (HAL_GetTick()).
+  */
 void Haberlesme_SendHeartbeat(uint32_t uptime_ms);
 
-/** @brief CRC-16/CCITT-FALSE (Jetson tarafiyla ayni; test icin acik). */
+/**
+  * @brief CRC-16/CCITT-FALSE (Jetson tarafiyla ayni; test icin acik).
+  */
 uint16_t Haberlesme_Crc16(const uint8_t *data, uint16_t len);
 
+/* ==========================================================================
+ *  RX yolu (Jetson -> STM):  COMMAND + HEARTBEAT cozucu
+ * ========================================================================== */
+
 /**
-  * @brief USART2 RX DMA dairesel tamponunu bosaltip gelen cerceveleri cozer.
+  * @brief USART6 RX DMA dairesel tamponunu bosaltip gelen cerceveleri cozer.
   *        Ana dongude her spin (CRSF_PumpDMA gibi, non-blocking) cagirin.
+  * @param now_ms  HAL_GetTick() — tazelik ve paket-kaybi zaman damgalari icin.
   */
 void Haberlesme_Poll(uint32_t now_ms);
 
-/** @brief Son dogrulanmis Jetson komutuna salt-okunur erisim. */
+/**
+  * @brief Son dogrulanmis Jetson komutuna salt-okunur erisim.
+  */
 const JetsonKomut *Haberlesme_GetKomut(void);
 
-/** @brief COMMAND <= CMD_TIMEOUT_MS icinde mi geldi (taze mi). */
+/**
+  * @brief COMMAND <= CMD_TIMEOUT_MS icinde mi geldi (taze mi).
+  */
 bool Haberlesme_KomutTaze(uint32_t now_ms);
 
-/** @brief Jetson paketi (COMMAND/HEARTBEAT) <= JETSON_HB_TIMEOUT_MS icinde mi. */
+/**
+  * @brief Jetson paketi (COMMAND/HEARTBEAT) <= JETSON_HB_TIMEOUT_MS icinde mi.
+  */
 bool Haberlesme_JetsonLinkTaze(uint32_t now_ms);
 
-/** @brief SEQ atlamalarindan tespit edilen toplam paket kaybi. */
+/**
+  * @brief SEQ atlamalarindan tespit edilen toplam paket kaybi.
+  */
 uint16_t Haberlesme_Kayip(void);
 
-/** @brief Son CRC hata bayragini okuyup temizler. */
+/**
+  * @brief Son CRC hata bayragini okuyup temizler.
+  */
 bool Haberlesme_CrcHata(void);
 
 /**
-  * @brief DMA1 Channel5 (USART2 RX) kesme kancasi.
-  *        stm32f0xx_it.c icindeki DMA1_Channel4_5_6_7_IRQHandler'dan cagrilir.
+  * @brief CDC_Receive_FS (USB IRQ) tarafindan cagrilir: gelen USB baytlarini
+  *        RX halka tamponuna kopyalar (parse ana donguda Haberlesme_Poll'da).
+  */
+void Haberlesme_CdcRxPush(const uint8_t *data, uint32_t len);
+
+/**
+  * @brief (LEGACY) USART6 RX DMA kesme kancasi. Native USB-CDC portunda HIC
+  *        cagrilmaz (stm32f0xx_it.c bu sembole dokunmaz); yalniz eski protokol
+  *        koduyla ikili uyum icin no-op olarak korunur.
   */
 void Haberlesme_DmaRxIrq(void);
 

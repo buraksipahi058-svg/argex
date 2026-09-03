@@ -2,7 +2,6 @@
   ******************************************************************************
   * @file    servo.c
   * @brief   RDS3235 servo PWM surucu implementasyonu
-  *          Donanimdan bagimsiz -> argexika ile BIREBIR ayni.
   ******************************************************************************
   */
 

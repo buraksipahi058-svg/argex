@@ -12,7 +12,6 @@
   *   tekrar gondermek zorunlu degildir (biz yine de periyodik gondeririz).
   *
   * NOT: UART modunda surucuye HC06 gibi baska bir modul BAGLANMAMALIDIR.
-  * NOT: Modul donanimdan bagimsizdir; sadece include F072 HAL'e cevrildi.
   ******************************************************************************
   */
 

@@ -1,9 +1,10 @@
 /**
   ******************************************************************************
   * @file    main.h
-  * @brief   Nucleo-F072RB portu - ortak tanimlar
+  * @brief   Header for main.c (Nucleo-F072RB portu)
   ******************************************************************************
   */
+
 #ifndef __MAIN_H
 #define __MAIN_H
 
@@ -11,8 +12,10 @@
 extern "C" {
 #endif
 
+/* Includes ------------------------------------------------------------------*/
 #include "stm32f0xx_hal.h"
 
+/* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
 
 #ifdef __cplusplus

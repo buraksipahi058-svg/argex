@@ -1,29 +1,28 @@
 /**
   ******************************************************************************
   * @file    haberlesme.c
-  * @brief   STM32 <-> Jetson ikili UART protokolu (HAL/C - F072 portu)
+  * @brief   STM32 <-> Jetson ikili protokol (HAL/C portu) — USB-CDC tasima
   *
-  *  Cerceve olusturma/cozme mantigi argexika (F407) haberlesme.c ile BIREBIR
-  *  aynidir. F072'ye tasinan TEK sey donanim kurulumudur (Haberlesme_Init):
-  *    USART6 (PC6/PC7, DMA2 Stream1)  ->  USART2 (PA2/PA3, DMA1 Channel5).
-  *  USART2, Nucleo-F072RB'de ST-Link Virtual COM Port'a (VCP) bagli oldugu
-  *  icin Jetson bu hatti USB uzerinden /dev/ttyACM* olarak gorur.
+  *  Cerceve olusturma, eski Arduino firmware'inin haberlesme.cpp dosyasindaki
+  *  frameGonder / telemetriGonder / heartbeatGonder ile BIREBIR aynidir. Tasima
+  *  katmani USART6'dan native USB Full-Speed CDC'ye tasindi (PA11/PA12); protokol
+  *  baytlari degismedi. TX = CDC_Transmit_FS, RX = CDC_Receive_FS -> halka tampon.
   ******************************************************************************
   */
 
 #include "haberlesme.h"
-#include "main.h"        /* Error_Handler() */
-
-/* USART2, full-duplex (TX blocking + RX DMA). Modul icine kapali. */
-static UART_HandleTypeDef s_huart;
+#include "main.h"          /* Error_Handler() */
+#include "usbd_cdc_if.h"   /* CDC_Transmit_FS(), USBD_OK/USBD_BUSY/USBD_FAIL */
 
 /* Giden paket sayaci (tum tipler ortak; 255 -> 0 otomatik sarar). */
 static uint8_t s_seq = 0;
 
-/* ---- RX (Jetson -> STM) durumu -------------------------------------------- */
-static DMA_HandleTypeDef s_hdma_rx;                 /* USART2_RX -> DMA1 Channel5 */
-static uint8_t  s_rx_buf[HABERLESME_RX_BUF];        /* DMA dairesel tampon */
-static uint16_t s_rx_tail;                          /* islenen son konum */
+/* ---- RX (Jetson -> STM) durumu: SPSC halka tampon -------------------------- */
+/* CDC_Receive_FS (USB IRQ) 'head'i ilerletir; Haberlesme_Poll (ana dongu) 'tail'i.
+   Tek uretici + tek tuketici oldugu icin kilit gerekmez (Cortex-M4 word atomik). */
+static uint8_t           s_rx_buf[HABERLESME_RX_BUF];  /* dairesel tampon */
+static volatile uint16_t s_rx_head;                    /* USB IRQ yazar */
+static uint16_t          s_rx_tail;                    /* ana dongu okur */
 
 /* Cerceve cozucu durum makinesi (AA 55 | VER TYPE LEN SEQ | PAYLOAD | CRC_L H) */
 enum { RX_H0, RX_H1, RX_VER, RX_TYP, RX_LEN, RX_SEQ, RX_PAY, RX_CRCL, RX_CRCH };
@@ -83,75 +82,28 @@ static void frame_send(uint8_t type, const uint8_t *payload, uint8_t len)
     buf[6 + len] = (uint8_t)(crc & 0xFF);          /* low  */
     buf[7 + len] = (uint8_t)((crc >> 8) & 0xFF);   /* high */
 
-    /* 115200'de en buyuk cerceve (STATUS) 16 bayt ~= 1.4 ms; 100 Hz donguyu
-       tikamaz. Reactor surucusuyle ayni blocking TX yaklasimi. */
-    HAL_UART_Transmit(&s_huart, buf, (uint16_t)(8 + len), 10);
+    /* USB-CDC ile gonder. CDC_Transmit_FS onceki IN transferi bitmediyse
+       USBD_BUSY doner; STATUS/HB araligi (>=50 ms) yaninda bu neredeyse hic
+       olmaz, yine de kisa bir sinirla bekleriz. USB bagli/konfigure degilse
+       (host yok) FAIL doner -> cerceve sessizce duser, dongu tikanmaz. */
+    uint32_t t0 = HAL_GetTick();
+    for (;;)
+    {
+        if (CDC_Transmit_FS(buf, (uint16_t)(8 + len)) != USBD_BUSY) { break; }
+        if ((HAL_GetTick() - t0) >= 5U) { break; }
+    }
 }
 
 /* ============================================================
- *  BASLATMA  (USART2 full-duplex: PA2 TX / PA3 RX -> ST-Link VCP)
- *  Not: HAL_UART_MspInit'e guvenmeden clock + GPIO + DMA'yi burada elle
- *  kuruyoruz (modul kendi kendine yeter). Yalniz DMA kesmesi icin
- *  stm32f0xx_it.c'deki DMA1_Channel4_5_6_7_IRQHandler -> Haberlesme_DmaRxIrq().
+ *  BASLATMA
+ *  USB (CDC) main.c'de MX_USB_DEVICE_Init() ile kurulur; burada donanim
+ *  kurmaya gerek yok. Yalniz protokol durumunu ve halka tamponu sifirlariz.
  * ============================================================ */
 void Haberlesme_Init(void)
 {
-    GPIO_InitTypeDef gpio = {0};
-
-    __HAL_RCC_USART2_CLK_ENABLE();
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    __HAL_RCC_DMA1_CLK_ENABLE();
-
-    /* PA2 -> USART2_TX , PA3 -> USART2_RX (ikisi de AF1) */
-    gpio.Pin       = GPIO_PIN_2 | GPIO_PIN_3;
-    gpio.Mode      = GPIO_MODE_AF_PP;
-    gpio.Pull      = GPIO_NOPULL;
-    gpio.Speed     = GPIO_SPEED_FREQ_HIGH;
-    gpio.Alternate = GPIO_AF1_USART2;
-    HAL_GPIO_Init(GPIOA, &gpio);
-
-    s_huart.Instance                    = USART2;
-    s_huart.Init.BaudRate               = HABERLESME_BAUD;
-    s_huart.Init.WordLength             = UART_WORDLENGTH_8B;
-    s_huart.Init.StopBits               = UART_STOPBITS_1;
-    s_huart.Init.Parity                 = UART_PARITY_NONE;
-    s_huart.Init.Mode                   = UART_MODE_TX_RX;
-    s_huart.Init.HwFlowCtl              = UART_HWCONTROL_NONE;
-    s_huart.Init.OverSampling           = UART_OVERSAMPLING_16;
-    s_huart.Init.OneBitSampling         = UART_ONE_BIT_SAMPLE_DISABLE;
-    s_huart.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-    if (HAL_UART_Init(&s_huart) != HAL_OK)
-    {
-        Error_Handler();
-    }
-
-    /* USART2_RX -> DMA1 Channel5, dairesel. (F0'da 'Stream'/'Channel'/'FIFO'
-       alanlari YOK; kanal secimi Instance ile yapilir.) */
-    s_hdma_rx.Instance                 = DMA1_Channel5;
-    s_hdma_rx.Init.Direction           = DMA_PERIPH_TO_MEMORY;
-    s_hdma_rx.Init.PeriphInc           = DMA_PINC_DISABLE;
-    s_hdma_rx.Init.MemInc              = DMA_MINC_ENABLE;
-    s_hdma_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
-    s_hdma_rx.Init.MemDataAlignment    = DMA_MDATAALIGN_BYTE;
-    s_hdma_rx.Init.Mode                = DMA_CIRCULAR;
-    s_hdma_rx.Init.Priority            = DMA_PRIORITY_LOW;
-    if (HAL_DMA_Init(&s_hdma_rx) != HAL_OK)
-    {
-        Error_Handler();
-    }
-    __HAL_LINKDMA(&s_huart, hdmarx, s_hdma_rx);
-
-    /* Cortex-M0 NVIC oncelikleri 0..3 araligindadir. */
-    HAL_NVIC_SetPriority(DMA1_Channel4_5_6_7_IRQn, 1, 0);
-    HAL_NVIC_EnableIRQ(DMA1_Channel4_5_6_7_IRQn);
-
-    if (HAL_UART_Receive_DMA(&s_huart, s_rx_buf, HABERLESME_RX_BUF) != HAL_OK)
-    {
-        Error_Handler();
-    }
-
     /* TX + RX durumlarini sifirla */
     s_seq            = 0;
+    s_rx_head        = 0;
     s_rx_tail        = 0;
     s_rx_state       = RX_H0;
     s_rx_seq_valid   = false;
@@ -161,6 +113,24 @@ void Haberlesme_Init(void)
     s_komut_alindi   = false;
     s_jetson_son     = 0;
     s_jetson_goruldu = false;
+}
+
+/* ============================================================
+ *  USB-CDC RX: gelen baytlari halka tampona koy.
+ *  CDC_Receive_FS'ten (USB IRQ baglami) cagrilir; parse islemi burada DEGIL,
+ *  ana donguda Haberlesme_Poll'da yapilir. Tampon dolarsa yeni bayt dusurulur
+ *  (cozucu bir sonraki AA 55 basligindan resenkron olur).
+ * ============================================================ */
+void Haberlesme_CdcRxPush(const uint8_t *data, uint32_t len)
+{
+    for (uint32_t i = 0; i < len; i++)
+    {
+        uint16_t next = (uint16_t)(s_rx_head + 1U);
+        if (next >= HABERLESME_RX_BUF) { next = 0U; }
+        if (next == s_rx_tail) { break; }      /* tampon dolu -> gerisini dusur */
+        s_rx_buf[s_rx_head] = data[i];
+        s_rx_head = next;
+    }
 }
 
 /* ============================================================
@@ -196,7 +166,11 @@ void Haberlesme_SendHeartbeat(uint32_t uptime_ms)
 
 /* ============================================================
  *  RX: CERCEVE COZUCU  (needtocheck/jetson_parser.py::feed aynasi)
+ *  Cerceve: AA 55 | VER | TYPE | LEN | SEQ | PAYLOAD | CRC_L CRC_H
+ *  CRC kapsam: VER..PAYLOAD  =  s_asm[0 .. 4+LEN-1]  (2 header + CRC haric)
  * ============================================================ */
+
+/* CRC gecerli tam bir cerceve toplandiginda cagrilir: tipe gore dagitir. */
 static void rx_frame_ok(uint32_t now_ms)
 {
     const uint8_t  type = s_asm[1];
@@ -305,17 +279,9 @@ static void rx_parse_byte(uint8_t b, uint32_t now_ms)
 
 void Haberlesme_Poll(uint32_t now_ms)
 {
-    /* DMA bir hata ile durduysa temizle ve yeniden baslat (ORE korumasi) */
-    if (s_huart.RxState != HAL_UART_STATE_BUSY_RX)
-    {
-        __HAL_UART_CLEAR_OREFLAG(&s_huart);
-        HAL_UART_Receive_DMA(&s_huart, s_rx_buf, HABERLESME_RX_BUF);
-        s_rx_tail  = 0;
-        s_rx_state = RX_H0;
-        return;
-    }
-
-    uint16_t head = (uint16_t)(HABERLESME_RX_BUF - __HAL_DMA_GET_COUNTER(s_huart.hdmarx));
+    /* USB IRQ'nun (CDC_Receive_FS -> Haberlesme_CdcRxPush) doldurdugu halka
+       tamponu bosalt, her bayti cozucuye besle. */
+    uint16_t head = s_rx_head;               /* volatile'in anlik goruntusu */
     while (s_rx_tail != head)
     {
         rx_parse_byte(s_rx_buf[s_rx_tail], now_ms);
@@ -355,5 +321,6 @@ bool Haberlesme_CrcHata(void)
 
 void Haberlesme_DmaRxIrq(void)
 {
-    HAL_DMA_IRQHandler(&s_hdma_rx);
+    /* LEGACY: USART6 RX DMA kancasiydi. Native USB-CDC portunda kullanilmiyor;
+       stm32f0xx_it.c bu fonksiyonu hic cagirmaz (no-op, ikili uyum icin durur). */
 }

@@ -2,7 +2,6 @@
   ******************************************************************************
   * @file    crsf.c
   * @brief   CRSF (ExpressLRS) protokol cozucu implementasyonu
-  *          Donanimdan bagimsiz -> argexika ile BIREBIR ayni.
   ******************************************************************************
   */
 

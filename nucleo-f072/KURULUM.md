@@ -1,126 +1,242 @@
-# Nucleo-F072RB firmware kurulumu
+# Nucleo-F072RB firmware kurulumu (native USB-CDC)
 
-`argexika/` (STM32F407) firmware'inin Nucleo-F072RB portu. Uygulama mantığı
-(`crsf`, `reactor`, `servo`, tank-mix, telemetri) **birebir aynı**; sadece donanım
-kurulumu (clock, USART/pin/DMA/timer) F072'ye taşındı.
+`argexika/` (STM32F407 **lazerson**) firmware'inin **Nucleo-F072RB** portu.
+Uygulama mantığı (`crsf`, `reactor`, `servo`, tank-mix, **CH9 E-STOP**, **lazer/otonom
+şeması**, telemetri) F407 ile **birebir aynı**; yalnız donanım katmanı (clock, USART,
+DMA, TIM, GPIO ve **Jetson linki = native USB-CDC**) F072'ye taşındı.
 
-> ⚠️ Bu dosyalar **elde portlandı, henüz derlenip donanımda test EDİLMEDİ.**
-> STM32CubeIDE'de derleyip araç üstünde (önce **motorlar havadayken**) doğrula.
+> ⚠️ Bu dosyalar **elde portlandı, henüz donanımda test EDİLMEDİ.** STM32CubeIDE'de
+> derleyip araç üstünde (önce **motorlar havadayken**) doğrula.
+
+Pin haritası bu dosyanın sonundadır. F407 haritası: [../pinmodev1.md](../pinmodev1.md).
 
 ---
 
-## 0. Neden CubeMX gerekiyor?
+## 0. Neden CubeMX/CubeIDE şart?
 
-Bu klasör yalnızca **uygulama kaynağını** içerir (`Core/Src`, `Core/Inc`). Bir
-STM32 projesinin geri kalanını — F0xx HAL sürücü ağacı, `startup_stm32f072xb.s`,
-linker script, `system_stm32f0xx.c`, `stm32f0xx_hal_conf.h` — **STM32CubeIDE üretir.**
-Bu yüzden önce boş bir F072RB projesi oluşturup, üretilen `Core/`'un üstüne bu
-dosyaları kopyalıyorsun.
+Bu klasör yalnızca **uygulama kaynağını** içerir. Bir STM32 projesinin geri kalanını —
+F0xx HAL sürücü ağacı, `startup_stm32f072xbtx.s`, linker script, `system_stm32f0xx.c`,
+`stm32f0xx_hal_conf.h` ve özellikle **USB Device middleware'i** (`usbd_core`, `usbd_cdc`,
+`usbd_conf`, `stm32f0xx_hal_pcd.c` …) — **STM32CubeIDE üretir.** Native USB seçildiği
+için bu üretim ZORUNLU: USB alt sürücüleri elle yazılamaz.
+
+STM32CubeIDE zaten kurulu: `C:\ST\STM32CubeIDE_2.2.0`. (F0 firmware paketi ilk
+"Generate Code"da otomatik iner — internet gerekir.)
 
 ---
 
 ## 1. Boş proje oluştur (STM32CubeIDE)
 
 1. **File → New → STM32 Project**
-2. Part Number: **STM32F072RB** (ya da Board Selector'dan **NUCLEO-F072RB**) → Next
-3. İsim ver (örn. `nucleo_f072_ika`), **C** projesi → Finish
-4. `.ioc` açılınca:
-   - **Clock:** varsayılan bırakabilirsin; kodumuz `SystemClock_Config`'i HSI48
-     48 MHz'e kendi ayarlıyor. (İstersen CubeMX'te de HSI48/48MHz seçip tutarlı yap.)
-   - **Pinlere DOKUNMANA GEREK YOK** — tüm çevre birim/pin/DMA kurulumu kod içinde
-     (`main.c` + `haberlesme.c`) yapılıyor. CubeMX'te USART/TIM/DMA açman **gerekmez.**
-5. **Project → Generate Code** (Ctrl+S) → iskelet `Core/` üretilir.
+2. **Board Selector → NUCLEO-F072RB** seç (ya da Part Number `STM32F072RBTx`) → **Next**
+3. İsim ver (örn. `nucleo_f072_ika`), **C** projesi → Finish.
+   (Board seçtiysen "initialize all peripherals in default mode?" çıkarsa **No** de —
+   pinleri biz koddan kuruyoruz.)
 
-> `stm32f0xx_hal_conf.h` içinde şu modüller **enabled** olmalı (CubeMX varsayılanı
-> genelde açık): `HAL_UART_MODULE_ENABLED`, `HAL_TIM_MODULE_ENABLED`,
-> `HAL_DMA_MODULE_ENABLED`, `HAL_GPIO_MODULE_ENABLED`, `HAL_RCC_MODULE_ENABLED`,
-> `HAL_CORTEX_MODULE_ENABLED`.
+### 1a. USB Device'ı aç (TEK gerçek CubeMX işi)
+
+`.ioc` sekmesinde:
+
+- **Connectivity → USB** → *Device (FS)* → **Activate** (`USB` işaretlensin).
+- **Middleware and Software Packs → USB_DEVICE** →
+  *Class For FS IP* = **Communication Device Class (Virtual Port Com)**.
+
+### 1b. Saat: HSI48 → 48 MHz
+
+**Clock Configuration** sekmesinde:
+
+- **SYSCLK / HCLK = 48 MHz**, kaynak **HSI48** (harici kristal YOK).
+- **USB clock = 48 MHz** (kaynak HSI48). CubeMX yeşil gösterene kadar ayarla.
+- CubeMX "Clock Recovery System (CRS)" önerirse aç; **açmasan da olur** — kodumuz
+  (`SystemClock_Config`) CRS'i kendi kuruyor.
+
+> Pin/USART/TIM/DMA'ya **DOKUNMA.** Hepsi `main.c` içinde koddan kuruluyor.
+
+### 1c. Generate Code (Ctrl+S)
+
+İskelet + USB middleware + HAL ağacı üretilir.
 
 ---
 
-## 2. Bu dosyaları projeye kopyala
+## 2. HAL modüllerini kontrol et  ⚠️ (derleme için kritik)
 
-Üretilen projenin `Core/` klasörünü **bu klasörün** dosyalarıyla değiştir/ekle:
+Pinleri koddan kurduğumuz için CubeMX bazı HAL modüllerini **kapalı** bırakabilir.
+Üretilen **`Core/Inc/stm32f0xx_hal_conf.h`** dosyasını aç, şu satırların **açık
+(yorumsuz)** olduğundan emin ol:
 
-| Kaynak (bu repo) | Hedef (CubeIDE projesi) | İşlem |
+```c
+#define HAL_UART_MODULE_ENABLED
+#define HAL_TIM_MODULE_ENABLED
+#define HAL_DMA_MODULE_ENABLED
+#define HAL_PCD_MODULE_ENABLED     /* USB - CubeMX zaten açar */
+#define HAL_RCC_MODULE_ENABLED     /* CRS bunun içinde */
+#define HAL_GPIO_MODULE_ENABLED
+#define HAL_CORTEX_MODULE_ENABLED
+```
+
+Kapalıysa `//` işaretini kaldır. (`UART`, `TIM`, `DMA` genelde CubeMX'te ilgili
+çevre birim açılmadığı için kapalı gelir — asıl bunları aç.)
+
+---
+
+## 3. Bu klasördeki dosyaları projeye kopyala
+
+Üretilen dosyaların **üzerine** kopyala / ekle:
+
+| Kaynak (bu repo `nucleo-f072/`) | Hedef (CubeIDE projesi) | İşlem |
 |---|---|---|
-| `Core/Src/main.c` | `Core/Src/main.c` | **değiştir** |
-| `Core/Src/stm32f0xx_it.c` | `Core/Src/stm32f0xx_it.c` | **değiştir** |
-| `Core/Src/haberlesme.c` | `Core/Src/haberlesme.c` | **ekle** |
-| `Core/Src/crsf.c` | `Core/Src/crsf.c` | **ekle** |
-| `Core/Src/reactor.c` | `Core/Src/reactor.c` | **ekle** |
-| `Core/Src/servo.c` | `Core/Src/servo.c` | **ekle** |
-| `Core/Inc/main.h` | `Core/Inc/main.h` | **değiştir** |
-| `Core/Inc/haberlesme.h` `crsf.h` `reactor.h` `servo.h` | `Core/Inc/` | **ekle** |
+| `Core/Src/main.c`            | `Core/Src/main.c`            | **DEĞİŞTİR** |
+| `Core/Inc/main.h`            | `Core/Inc/main.h`            | **DEĞİŞTİR** |
+| `Core/Src/stm32f0xx_it.c`    | `Core/Src/stm32f0xx_it.c`    | **DEĞİŞTİR** |
+| `Core/Inc/stm32f0xx_it.h`    | `Core/Inc/stm32f0xx_it.h`    | **DEĞİŞTİR** |
+| `USB_DEVICE/App/usbd_cdc_if.c` | `USB_DEVICE/App/usbd_cdc_if.c` | **DEĞİŞTİR** (RX kancası içinde) |
+| `Core/Src/crsf.c reactor.c servo.c haberlesme.c` | `Core/Src/` | **EKLE** |
+| `Core/Inc/crsf.h reactor.h servo.h haberlesme.h` | `Core/Inc/` | **EKLE** |
 
-> `stm32f0xx_it.c`'yi değiştirmek istemezsen, sadece iki DMA handler'ını
-> (`DMA1_Channel2_3_IRQHandler` ve `DMA1_Channel4_5_6_7_IRQHandler`) üretilen
-> dosyanın USER CODE alanlarına yapıştır + `extern DMA_HandleTypeDef hdma_crsf_rx;`
-> ekle. Ama SysTick vs. çakışmaması için **komple değiştirmek daha temiz.**
+> **`stm32f0xx_it.c`'yi neden komple değiştiriyoruz?** İçinde `USB_IRQHandler`
+> (USB kesmesi) + `DMA1_Channel2_3_IRQHandler` (CRSF DMA) var; CubeMX'in ürettiği
+> `SysTick`/`USB` handler'larıyla çakışmasın diye tamamını değiştiriyoruz.
+
+> **`usbd_cdc_if.c` alternatifi:** Komple değiştirmek istemezsen, CubeMX'in ürettiği
+> dosyada 3 küçük ekleme yeter (aşağıda §3a).
+
+### 3a. (Alternatif) usbd_cdc_if.c'yi elle yamalamak
+
+Üretilen `USB_DEVICE/App/usbd_cdc_if.c` içinde:
+
+```c
+/* USER CODE BEGIN INCLUDE */
+#include "haberlesme.h"                 /* <-- ekle */
+/* USER CODE END INCLUDE */
+```
+```c
+static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
+{
+  /* USER CODE BEGIN 6 */
+  Haberlesme_CdcRxPush(Buf, *Len);      /* <-- ekle (ilk satir) */
+  USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
+  USBD_CDC_ReceivePacket(&hUsbDeviceFS);
+  return (USBD_OK);
+  /* USER CODE END 6 */
+}
+```
+```c
+uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len)
+{
+  uint8_t result = USBD_OK;
+  /* USER CODE BEGIN 7 */
+  USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceFS.pClassData;
+  if (hcdc == NULL){ return USBD_FAIL; }   /* <-- ekle: host yokken null deref koru */
+  if (hcdc->TxState != 0){ return USBD_BUSY; }
+  ...
+```
+
+### 3b. (İsteğe bağlı) RAM tasarrufu — 16 KB SRAM
+
+`USB_DEVICE/App/usbd_cdc_if.h` içindeki tamponlar varsayılan 2048'er bayttır (4 KB).
+İstersen küçült (protokol paketleri ≤ ~20 bayt):
+
+```c
+#define APP_RX_DATA_SIZE  512
+#define APP_TX_DATA_SIZE  512
+```
 
 ---
 
-## 3. Derle ve yükle
+## 4. Derle ve yükle
 
 - **Project → Build** (Ctrl+B). Hata yoksa `.elf` üretilir.
-- Nucleo'yu USB ile PC'ye tak → **Run** (yeşil ok) ya da sürükle-bırak (`.bin`'i
-  `NODE_F072RB` diskine kopyala).
+- Nucleo'yu **onboard USB (ST-Link)** ile PC'ye tak → **Run** (yeşil ok).
 
-### Derlemede çıkabilecek tek olası sorun: AF makro adları
+### Derlemede çıkabilecek olası sorunlar
 
-HAL sürüm farkıyla bazı AF makrolarının adı değişebilir. Derleyici `GPIO_AF4_USART3`
-/ `GPIO_AF0_USART4` bulamazsa, **datasheet AF numarasını** doğrudan yaz:
-
-| Kod satırı | Anlamı | Bulunamazsa |
-|---|---|---|
-| `GPIO_AF1_USART1` (PA10) | CRSF RX | `1` |
-| `GPIO_AF1_USART2` (PA2/PA3) | Jetson | `1` |
-| `GPIO_AF4_USART3` (PB10) | SOL Reactor | `4` |
-| `GPIO_AF0_USART4` (PC10) | SAG Reactor | `0` |
-| `GPIO_AF1_TIM3` (PB0/PB1) | Servo | `1` |
+| Belirti | Sebep / çözüm |
+|---|---|
+| `HAL_UART_Init` / `HAL_TIM_*` "undefined" | §2'deki HAL modülleri kapalı → aç. |
+| `GPIO_AF4_USART3` / `GPIO_AF0_USART4` bulunamadı | HAL sürüm farkı → datasheet AF no'sunu yaz (USART3=`4`, USART4=`0`, USART1=`1`, TIM3=`1`). |
+| `hpcd_USB_FS` undefined (it.c) | CubeMX PCD handle adı farklı olabilir → `usbd_conf.c`'deki `PCD_HandleTypeDef hpcd_USB_FS;` adına göre `stm32f0xx_it.c`'yi düzelt. |
+| `RCC_USBCLKSOURCE_HSI48` / CRS makroları yok | USB, `.ioc`'de açılmamış (§1a) ya da HSI48 seçili değil (§1b). |
 
 ---
 
-## 4. Jetson tarafı (bu repo)
+## 5. USB kablolaması (Jetson linki)  ⚠️ ÖNEMLİ
 
-- [jetson/config.yaml](../jetson/config.yaml): `serial_port` zaten `/dev/ttyACM0`
-  yapıldı. Nucleo takılınca sabit yol için:
-  ```bash
-  ls -l /dev/serial/by-id/
-  ```
-  çıkan `usb-STMicroelectronics_STM32_STLink_...-if02` yolunu yaz.
-- ModemManager portu kapmasın:
-  ```bash
-  sudo systemctl disable --now ModemManager
-  ```
-- Kullanıcı `dialout` grubunda olsun.
+Nucleo'nun **onboard USB soketi ST-Link'e** gider, MCU'nun kendi USB'sine **değil**.
+Native USB-CDC için MCU'nun USB pinlerini **ayrı bir USB kablosuna** bağlaman gerekir:
+
+```
+STM32 PA12 (USB_DP, D+)  ───────►  USB konnektor D+   ─┐
+STM32 PA11 (USB_DM, D-)  ───────►  USB konnektor D-    ├─► Jetson USB portu
+STM32 GND                ───────►  USB konnektor GND  ─┘
+        (USB konnektorun VBUS/5V hattini STM32'ye BAGLAMA — sadece D+/D-/GND)
+```
+
+- Harici pull-up gerekmez (F072'nin dahili DP pull-up'ı var).
+- Onboard USB (ST-Link) flashlama/debug için ayrıca takılı kalabilir.
+- Jetson'da **`/dev/ttyACM*`** olarak görünür (ST VID/PID, CDC-ACM).
 
 ---
 
-## 5. Bring-up testi (sırayla)
+## 6. Bring-up testi (sırayla, motorlar HAVADA!)
 
-1. **CRSF:** Kumandayı aç → mavi LED (PC2) yanmalı (link OK). Kapat → kırmızı (PC1).
-2. **Servolar:** CH4/CH3 stickleri → PB0/PB1'de PWM, pan/tilt hareket.
-3. **Motorlar (HAVADA!):** CH5 ARM (>1700µs) + stick → reactor'lar dönmeli.
-   Ters dönerse `main.c`'deki `*_INV_*` işaretini çevir.
-4. **Jetson linki:** Nucleo USB'sini Jetson'a al →
+1. **CRSF:** Kumandayı aç → mavi LED (**PC2**) yanmalı (link OK). Kapat → kırmızı (**PC1**).
+2. **Servolar:** LAZER moduna al (**CH7 > 1700µs**) → CH1/CH2 stickleri PB0/PB1'de PWM,
+   pan/tilt hareket.
+3. **Motorlar (HAVADA!):** Sürüş modu (CH7 kapalı), CH5 MANUEL + stick → reactor'lar
+   dönmeli. Ters dönerse `main.c`'deki `*_INV_*` işaretini çevir.
+4. **E-STOP:** CH9 butonuna bir kez bas → her şey durup **kilitlenir**; reset:
+   butonu bırak **ve** CH5'i MANUEL'e al.
+5. **Jetson linki (native USB):** PA11/PA12'yi Jetson'a bağla →
    ```bash
+   ls -l /dev/serial/by-id/          # ttyACM yolunu bul
    python3 sim/jetson_link_test.py /dev/ttyACM0
    ```
    `jetson_link=True` ve STATUS akışı görülmeli.
 
+Jetson tarafı: [jetson/config.yaml](../jetson/config.yaml) `serial_port` → çıkan
+`by-id` yolunu yaz; `sudo systemctl disable --now ModemManager`; kullanıcı `dialout`'ta.
+
 ---
 
-## 6. Özet: F407 → F072 değişen donanım
+## 7. PİN HARİTASI — Nucleo-F072RB (native USB-CDC)
 
-| İşlev | F407 | F072 |
+| İşlev | Pin | Çevre birim | AF | Baud/PWM | Not |
+|---|---|---|---|---|---|
+| **Jetson (USB-CDC)** | **PA11/PA12** | USB (DM/DP) | — | FS | ayrı USB kablosu → Jetson |
+| **CRSF / ELRS** | **PA10** | USART1_RX | 1 | 420000 | DMA1 Ch3 (circular) |
+| **SOL Reactor** | **PB10** | USART3_TX | 4 | 38400 | TX-only |
+| **SAĞ Reactor** | **PC10** | USART4_TX | 0 | 38400 | TX-only |
+| **PAN servo** | **PB0** | TIM3_CH3 | 1 | 50 Hz | 700–2300 µs, rate |
+| **TILT servo** | **PB1** | TIM3_CH4 | 1 | 50 Hz | 1100–1900 µs, mutlak |
+| **Reactor EN** | **PC0** | GPIO out | — | — | armlıyken HIGH |
+| **LAZER ateş** | **PC3** | GPIO out | — | — | CH10 tetikte HIGH |
+| **Kırmızı LED (FAILSAFE)** | **PC1** | GPIO out | — | — | link yok/E-STOP |
+| **Mavi LED (LINK OK)** | **PC2** | GPIO out | — | — | link var |
+
+### F407 → F072 değişen donanım
+
+| İşlev | F407 (lazerson) | F072 (bu port) |
 |---|---|---|
-| Jetson | USART6 PC6/PC7, DMA2_Stream1 | **USART2 PA2/PA3 (VCP), DMA1_Ch5** |
+| Jetson | USB-CDC OTG_FS PA11/PA12 | **USB-CDC (USB IP) PA11/PA12** |
 | CRSF | USART2 PA3, DMA1_Stream5 | **USART1 PA10, DMA1_Ch3** |
 | SOL Reactor | USART1 PB6 | **USART3 PB10** |
-| SAG Reactor | USART3 PD8 | **USART4 PC10** |
-| Servo | TIM4 PD12/PD13 | **TIM3 PB0/PB1** |
-| EN/FIRE/LED'ler | PE0/PE1/PD14/PD15 | **PC0/PC3/PC1/PC2** |
-| Clock | 168 MHz (HSE+PLL) | **48 MHz (HSI48)** |
+| SAĞ Reactor | USART3 PD8 | **USART4 PC10** |
+| Servo PAN/TILT | TIM4 PD12/PD13 | **TIM3 PB0/PB1** |
+| EN / ATEŞ / LED | PE0 / PE1 / PD14-PD15 | **PC0 / PC3 / PC1-PC2** |
+| Clock | 168 MHz (HSE+PLL) | **48 MHz (HSI48 + CRS)** |
 
-Ayrıntılı pin haritası: [pinmodev2.md](../pinmodev2.md)
+### Kumanda kanalları (F407 lazerson ile AYNI)
+
+| Kanal | Sürüş modu | Lazer modu | Eşik |
+|---|---|---|---|
+| CH1 | STEER | PAN servo | stick |
+| CH2 | THROTTLE | TILT servo | stick |
+| CH5 | MANUEL/OTONOM | — | >1500 = OTONOM |
+| CH6 | HIZ (%30/60/100) | — | 3 poz |
+| CH7 | — | LAZER modu | >1700 = LAZER |
+| CH9 | E-STOP (kilitli) | E-STOP | >1500 = basılı |
+| CH10 | — | ATEŞ | >1700 = ateş |
+
+**Öncelik:** CH7 (lazer) > CH5. Lazer açıkken motorlar durur, otonom devre dışı.
+Otonom sürüş şu an yalnız bayrak gönderir (`main.c` → `AUTO_DRIVE_ENABLED 0`); Jetson
+sürüş kodu hazır olunca `1` yap.

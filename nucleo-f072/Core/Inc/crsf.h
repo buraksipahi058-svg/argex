@@ -7,9 +7,6 @@
   * Baudrate: 420000, 8N1
   * Frame:  [0xC8][LEN][TYPE][PAYLOAD...][CRC8(poly 0xD5)]
   * TYPE 0x16 = RC_CHANNELS_PACKED -> 22 byte icinde 16 adet 11-bit kanal
-  *
-  * NOT: Bu modul donanimdan BAGIMSIZDIR (F407/F072 farketmez), argexika ile
-  *      birebir aynidir. Sadece byte besleme kaynagi (UART/DMA) main.c'de.
   ******************************************************************************
   */
 

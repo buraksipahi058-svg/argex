@@ -3,21 +3,21 @@
   * @file    stm32f0xx_it.c
   * @brief   Interrupt Service Routines (Nucleo-F072RB portu)
   *
-  *  Cortex-M0 cekirdeginde F4'teki MemManage/BusFault/UsageFault/DebugMon
-  *  handler'lari YOKTUR; yalniz NMI/HardFault/SVC/PendSV/SysTick vardir.
+  *  Cortex-M0 cekirdegi: yalniz NMI/HardFault/SVC/PendSV/SysTick cekirdek
+  *  istisnalari + kullanilan cevre birim vektorleri.
   *
-  *  DMA yonlendirmesi:
-  *    DMA1 Channel3 (USART1_RX / CRSF)  -> DMA1_Channel2_3_IRQHandler
-  *    DMA1 Channel5 (USART2_RX / Jetson)-> DMA1_Channel4_5_6_7_IRQHandler
+  *  DIKKAT: CubeMX bu dosyayi da uretir. Bu surumle TAMAMEN DEGISTIRIN
+  *  (uzerine ekleme YAPMAYIN) - aksi halde USB_IRQHandler / SysTick_Handler
+  *  cift tanimlanip linker hatasi verir. Ayrinti: KURULUM.md
   ******************************************************************************
   */
 
 #include "main.h"
 #include "stm32f0xx_it.h"
-#include "haberlesme.h"        /* Haberlesme_DmaRxIrq() (USART2 RX DMA kancasi) */
 
-/* CRSF (USART1_RX) DMA handle - main.c'de tanimli. */
-extern DMA_HandleTypeDef hdma_crsf_rx;
+/* Disaridan erisilen handle'lar */
+extern PCD_HandleTypeDef hpcd_USB_FS;    /* usbd_conf.c (CubeMX) tanimlar */
+extern DMA_HandleTypeDef hdma_crsf_rx;   /* main.c tanimlar (USART1_RX / DMA1 Ch3) */
 
 /******************************************************************************/
 /*           Cortex-M0 Processor Interruption and Exception Handlers         */
@@ -25,16 +25,16 @@ extern DMA_HandleTypeDef hdma_crsf_rx;
 
 void NMI_Handler(void)
 {
-    while (1)
-    {
-    }
+  while (1)
+  {
+  }
 }
 
 void HardFault_Handler(void)
 {
-    while (1)
-    {
-    }
+  while (1)
+  {
+  }
 }
 
 void SVC_Handler(void)
@@ -47,7 +47,7 @@ void PendSV_Handler(void)
 
 void SysTick_Handler(void)
 {
-    HAL_IncTick();
+  HAL_IncTick();
 }
 
 /******************************************************************************/
@@ -55,17 +55,17 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /**
-  * @brief DMA1 Channel2/3 ortak kesmesi - CRSF (USART1_RX, Channel3).
+  * @brief  USB Full-Speed global kesmesi (native USB-CDC / Jetson linki).
   */
-void DMA1_Channel2_3_IRQHandler(void)
+void USB_IRQHandler(void)
 {
-    HAL_DMA_IRQHandler(&hdma_crsf_rx);
+  HAL_PCD_IRQHandler(&hpcd_USB_FS);
 }
 
 /**
-  * @brief DMA1 Channel4/5/6/7 ortak kesmesi - Jetson (USART2_RX, Channel5).
+  * @brief  DMA1 Channel2/3 ortak kesmesi. CRSF (USART1_RX) DMA Channel3'te.
   */
-void DMA1_Channel4_5_6_7_IRQHandler(void)
+void DMA1_Channel2_3_IRQHandler(void)
 {
-    Haberlesme_DmaRxIrq();     /* -> HAL_DMA_IRQHandler(&s_hdma_rx) */
+  HAL_DMA_IRQHandler(&hdma_crsf_rx);
 }

@@ -2,7 +2,6 @@
   ******************************************************************************
   * @file    reactor.c
   * @brief   Reactor motor surucu UART (MODE 3) surucu katmani
-  *          Donanimdan bagimsiz -> argexika ile BIREBIR ayni.
   ******************************************************************************
   */
 

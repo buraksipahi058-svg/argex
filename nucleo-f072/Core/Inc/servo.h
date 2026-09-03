@@ -3,12 +3,9 @@
   * @file    servo.h
   * @brief   RDS3235 (270 derece, dijital) servo PWM surucu katmani
   *
-  * Timer 1 MHz'e ayarlanir, ARR = 20000-1 -> 50 Hz.
+  * Timer 1 MHz'e ayarlanir (PSC = 84-1 @84MHz), ARR = 20000-1 -> 50 Hz.
   * Bu durumda CCR degeri dogrudan mikrosaniye demektir.
   * RDS3235 darbe araligi: 500 us .. 2500 us  (~270 derece)
-  *
-  * NOT (F072): Timer 1 MHz tabani icin PSC main.c'de F072'ye gore ayarlanir
-  *             (TIM3 @48 MHz -> PSC = 48-1). Modul mantigi degismez.
   ******************************************************************************
   */
 
