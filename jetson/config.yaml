@@ -13,11 +13,14 @@ source:
   #   udp    : receive raw STM protocol bytes over UDP (used by sim/fake_stm and
   #            for an on-Jetson IPC tap where the existing process re-publishes
   #            the raw frames it already reads).
-  type: udp
+  type: serial
 
   # --- serial source (real hardware) ---
-  serial_port: /dev/ttyTHS1
-  serial_baud: 115200          # matches haberlesme.cpp (do not change)
+  # Nucleo-F072RB, Jetson'a ST-Link USB'siyle baglanir -> Jetson'da USB-CDC (ttyACM).
+  # ttyACMx numarasi replug'da kayabilir; sabitlemek icin by-id yolunu tercih et:
+  #   /dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_*-if02
+  serial_port: /dev/ttyACM0
+  serial_baud: 115200          # Nucleo USART2 (PA2/PA3, ST-Link VCP) ile ayni olmali
 
   # --- udp source (sim / IPC tap) ---
   udp_host: 127.0.0.1
@@ -37,28 +40,47 @@ telemetry:
   event_debounce_ms: 150      # min interval between repeats of the same event type
 
 video:
-  enabled: false              # set true on the Jetson with GStreamer + NVENC
-  base_host: 127.0.0.1        # Base Station (MediaMTX) address
-  encoder: h264               # h264 (NVENC, broad support) | h265
+  # Gateway, kameralari MOD-FARKINDA yonetir (ffmpeg -> MediaMTX RTSP push):
+  #   DRIVE modu  -> front + rear yayinda, turret kapali
+  #   LASER modu  -> turret yayinda, front + rear kapali
+  # Mod, STM aktifMod telemetrisinden (kumandada CH5) gelir; gecis otomatiktir.
+  # Ayni anda en fazla 2 kamera acik kalir: hem Wi-Fi bandini hem de USB
+  # isochronous butcesini (3 es-zamanli -> VIDIOC_STREAMON ENOSPC) korur.
+  enabled: true
+  base_host: 127.0.0.1        # MediaMTX Jetson'da calisir (RTSP push hedefi)
+  encoder: x264               # yazilim x264 (NVENC/rtspclientsink bu unitede yok)
+  # Cihazlar SABIT yollarla baglanir (videoN numaralari reboot/replug'da kayar):
+  #   - turret = C922 Pro : benzersiz seri -> by-id (hangi porta takilsa da bulunur)
+  #   - front/rear = iki C270 : AYNI serili (200901010001) -> by-id ayirt EDEMEZ,
+  #     bu yuzden by-path (fiziksel USB port) sart.
+  # SART: her kamerayi hep ayni USB portunda tut (C922->2.1, front C270->2.2,
+  # rear C270->2.4). Portu degistirirsen by-path eslemesi de degisir.
   cameras:
-    - name: front
-      device: /dev/video0
-      width: 1280
-      height: 720
-      fps: 30
-      bitrate_kbps: 4000
-      rtp_port: 5000
-    - name: rear
-      device: /dev/video1
-      width: 1280
-      height: 720
-      fps: 30
-      bitrate_kbps: 4000
-      rtp_port: 5002
+    # TARET: en iyi kamera (C922 Pro). Lazer modunda tek basina yayinlandigi icin
+    # istenirse 720p'ye cikarilabilir (front/rear'i etkilemez).
     - name: turret
-      device: /dev/video2
-      width: 1920
-      height: 1080
-      fps: 60
-      bitrate_kbps: 8000
-      rtp_port: 5004
+      device: /dev/v4l/by-id/usb-046d_C922_Pro_Stream_Webcam_6231597F-video-index0
+      input_format: mjpeg
+      width: 640
+      height: 480
+      fps: 30
+      bitrate_kbps: 1000
+      mode: laser
+    # ON: C270, USB port 2.2
+    - name: front
+      device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.2:1.0-video-index0
+      input_format: mjpeg
+      width: 640
+      height: 480
+      fps: 30
+      bitrate_kbps: 1000
+      mode: drive
+    # ARKA: C270, USB port 2.4
+    - name: rear
+      device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.4:1.0-video-index0
+      input_format: mjpeg
+      width: 640
+      height: 480
+      fps: 30
+      bitrate_kbps: 1000
+      mode: drive

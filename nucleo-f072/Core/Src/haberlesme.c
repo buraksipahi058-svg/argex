@@ -1,27 +1,28 @@
 /**
   ******************************************************************************
   * @file    haberlesme.c
-  * @brief   STM32 -> Jetson ikili UART telemetri protokolu (HAL/C portu)
+  * @brief   STM32 <-> Jetson ikili protokol (HAL/C portu) — USB-CDC tasima
   *
   *  Cerceve olusturma, eski Arduino firmware'inin haberlesme.cpp dosyasindaki
-  *  frameGonder / telemetriGonder / heartbeatGonder ile BIREBIR aynidir; ama
-  *  Arduino/HardwareSerial yerine STM32 HAL (USART6, blocking TX) kullanir.
+  *  frameGonder / telemetriGonder / heartbeatGonder ile BIREBIR aynidir. Tasima
+  *  katmani USART6'dan native USB Full-Speed CDC'ye tasindi (PA11/PA12); protokol
+  *  baytlari degismedi. TX = CDC_Transmit_FS, RX = CDC_Receive_FS -> halka tampon.
   ******************************************************************************
   */
 
 #include "haberlesme.h"
-#include "main.h"        /* Error_Handler() */
-
-/* USART6, full-duplex (TX blocking + RX DMA). Modul icine kapali. */
-static UART_HandleTypeDef s_huart;
+#include "main.h"          /* Error_Handler() */
+#include "usbd_cdc_if.h"   /* CDC_Transmit_FS(), USBD_OK/USBD_BUSY/USBD_FAIL */
 
 /* Giden paket sayaci (tum tipler ortak; 255 -> 0 otomatik sarar). */
 static uint8_t s_seq = 0;
 
-/* ---- RX (Jetson -> STM) durumu -------------------------------------------- */
-static DMA_HandleTypeDef s_hdma_rx;                 /* USART6_RX -> DMA2 Stream1 */
-static uint8_t  s_rx_buf[HABERLESME_RX_BUF];        /* DMA dairesel tampon */
-static uint16_t s_rx_tail;                          /* islenen son konum */
+/* ---- RX (Jetson -> STM) durumu: SPSC halka tampon -------------------------- */
+/* CDC_Receive_FS (USB IRQ) 'head'i ilerletir; Haberlesme_Poll (ana dongu) 'tail'i.
+   Tek uretici + tek tuketici oldugu icin kilit gerekmez (Cortex-M4 word atomik). */
+static uint8_t           s_rx_buf[HABERLESME_RX_BUF];  /* dairesel tampon */
+static volatile uint16_t s_rx_head;                    /* USB IRQ yazar */
+static uint16_t          s_rx_tail;                    /* ana dongu okur */
 
 /* Cerceve cozucu durum makinesi (AA 55 | VER TYPE LEN SEQ | PAYLOAD | CRC_L H) */
 enum { RX_H0, RX_H1, RX_VER, RX_TYP, RX_LEN, RX_SEQ, RX_PAY, RX_CRCL, RX_CRCH };
@@ -81,75 +82,28 @@ static void frame_send(uint8_t type, const uint8_t *payload, uint8_t len)
     buf[6 + len] = (uint8_t)(crc & 0xFF);          /* low  */
     buf[7 + len] = (uint8_t)((crc >> 8) & 0xFF);   /* high */
 
-    /* 115200'de en buyuk cerceve (STATUS) 16 bayt ~= 1.4 ms; 100 Hz donguyu
-       tikamaz. Reactor surucusuyle ayni blocking TX yaklasimi. */
-    HAL_UART_Transmit(&s_huart, buf, (uint16_t)(8 + len), 10);
+    /* USB-CDC ile gonder. CDC_Transmit_FS onceki IN transferi bitmediyse
+       USBD_BUSY doner; STATUS/HB araligi (>=50 ms) yaninda bu neredeyse hic
+       olmaz, yine de kisa bir sinirla bekleriz. USB bagli/konfigure degilse
+       (host yok) FAIL doner -> cerceve sessizce duser, dongu tikanmaz. */
+    uint32_t t0 = HAL_GetTick();
+    for (;;)
+    {
+        if (CDC_Transmit_FS(buf, (uint16_t)(8 + len)) != USBD_BUSY) { break; }
+        if ((HAL_GetTick() - t0) >= 5U) { break; }
+    }
 }
 
 /* ============================================================
- *  BASLATMA  (USART6 full-duplex: PC6 TX / PC7 RX)
- *  Not: HAL_UART_MspInit USART6 bilmiyor; bu yuzden clock + GPIO + DMA'yi
- *  HAL_UART_Init cevresinde elle kuruyoruz (modul kendi kendine yeter,
- *  stm32f4xx_hal_msp.c'ye dokunmaya gerek kalmaz). Yalniz DMA kesmesi icin
- *  stm32f4xx_it.c'deki DMA2_Stream1_IRQHandler -> Haberlesme_DmaRxIrq() lazim.
+ *  BASLATMA
+ *  USB (CDC) main.c'de MX_USB_DEVICE_Init() ile kurulur; burada donanim
+ *  kurmaya gerek yok. Yalniz protokol durumunu ve halka tamponu sifirlariz.
  * ============================================================ */
 void Haberlesme_Init(void)
 {
-    GPIO_InitTypeDef gpio = {0};
-
-    __HAL_RCC_USART6_CLK_ENABLE();
-    __HAL_RCC_GPIOC_CLK_ENABLE();
-    __HAL_RCC_DMA2_CLK_ENABLE();
-
-    /* PC6 -> USART6_TX , PC7 -> USART6_RX (ikisi de AF8) */
-    gpio.Pin       = GPIO_PIN_6 | GPIO_PIN_7;
-    gpio.Mode      = GPIO_MODE_AF_PP;
-    gpio.Pull      = GPIO_NOPULL;
-    gpio.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
-    gpio.Alternate = GPIO_AF8_USART6;
-    HAL_GPIO_Init(GPIOC, &gpio);
-
-    s_huart.Instance          = USART6;
-    s_huart.Init.BaudRate     = HABERLESME_BAUD;
-    s_huart.Init.WordLength   = UART_WORDLENGTH_8B;
-    s_huart.Init.StopBits     = UART_STOPBITS_1;
-    s_huart.Init.Parity       = UART_PARITY_NONE;
-    s_huart.Init.Mode         = UART_MODE_TX_RX;
-    s_huart.Init.HwFlowCtl    = UART_HWCONTROL_NONE;
-    s_huart.Init.OverSampling = UART_OVERSAMPLING_16;
-    if (HAL_UART_Init(&s_huart) != HAL_OK)
-    {
-        Error_Handler();
-    }
-
-    /* USART6_RX -> DMA2 Stream1 Kanal5, dairesel: baytlari arka planda yakalar,
-       biz Haberlesme_Poll() ile bosaltiriz (CRSF ile ayni yaklasim). */
-    s_hdma_rx.Instance                 = DMA2_Stream1;
-    s_hdma_rx.Init.Channel             = DMA_CHANNEL_5;
-    s_hdma_rx.Init.Direction           = DMA_PERIPH_TO_MEMORY;
-    s_hdma_rx.Init.PeriphInc           = DMA_PINC_DISABLE;
-    s_hdma_rx.Init.MemInc              = DMA_MINC_ENABLE;
-    s_hdma_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
-    s_hdma_rx.Init.MemDataAlignment    = DMA_MDATAALIGN_BYTE;
-    s_hdma_rx.Init.Mode                = DMA_CIRCULAR;
-    s_hdma_rx.Init.Priority            = DMA_PRIORITY_LOW;
-    s_hdma_rx.Init.FIFOMode            = DMA_FIFOMODE_DISABLE;
-    if (HAL_DMA_Init(&s_hdma_rx) != HAL_OK)
-    {
-        Error_Handler();
-    }
-    __HAL_LINKDMA(&s_huart, hdmarx, s_hdma_rx);
-
-    HAL_NVIC_SetPriority(DMA2_Stream1_IRQn, 5, 0);
-    HAL_NVIC_EnableIRQ(DMA2_Stream1_IRQn);
-
-    if (HAL_UART_Receive_DMA(&s_huart, s_rx_buf, HABERLESME_RX_BUF) != HAL_OK)
-    {
-        Error_Handler();
-    }
-
     /* TX + RX durumlarini sifirla */
     s_seq            = 0;
+    s_rx_head        = 0;
     s_rx_tail        = 0;
     s_rx_state       = RX_H0;
     s_rx_seq_valid   = false;
@@ -159,6 +113,24 @@ void Haberlesme_Init(void)
     s_komut_alindi   = false;
     s_jetson_son     = 0;
     s_jetson_goruldu = false;
+}
+
+/* ============================================================
+ *  USB-CDC RX: gelen baytlari halka tampona koy.
+ *  CDC_Receive_FS'ten (USB IRQ baglami) cagrilir; parse islemi burada DEGIL,
+ *  ana donguda Haberlesme_Poll'da yapilir. Tampon dolarsa yeni bayt dusurulur
+ *  (cozucu bir sonraki AA 55 basligindan resenkron olur).
+ * ============================================================ */
+void Haberlesme_CdcRxPush(const uint8_t *data, uint32_t len)
+{
+    for (uint32_t i = 0; i < len; i++)
+    {
+        uint16_t next = (uint16_t)(s_rx_head + 1U);
+        if (next >= HABERLESME_RX_BUF) { next = 0U; }
+        if (next == s_rx_tail) { break; }      /* tampon dolu -> gerisini dusur */
+        s_rx_buf[s_rx_head] = data[i];
+        s_rx_head = next;
+    }
 }
 
 /* ============================================================
@@ -307,17 +279,9 @@ static void rx_parse_byte(uint8_t b, uint32_t now_ms)
 
 void Haberlesme_Poll(uint32_t now_ms)
 {
-    /* DMA bir hata ile durduysa temizle ve yeniden baslat (ORE korumasi) */
-    if (s_huart.RxState != HAL_UART_STATE_BUSY_RX)
-    {
-        __HAL_UART_CLEAR_OREFLAG(&s_huart);
-        HAL_UART_Receive_DMA(&s_huart, s_rx_buf, HABERLESME_RX_BUF);
-        s_rx_tail  = 0;
-        s_rx_state = RX_H0;
-        return;
-    }
-
-    uint16_t head = (uint16_t)(HABERLESME_RX_BUF - __HAL_DMA_GET_COUNTER(s_huart.hdmarx));
+    /* USB IRQ'nun (CDC_Receive_FS -> Haberlesme_CdcRxPush) doldurdugu halka
+       tamponu bosalt, her bayti cozucuye besle. */
+    uint16_t head = s_rx_head;               /* volatile'in anlik goruntusu */
     while (s_rx_tail != head)
     {
         rx_parse_byte(s_rx_buf[s_rx_tail], now_ms);
@@ -357,5 +321,6 @@ bool Haberlesme_CrcHata(void)
 
 void Haberlesme_DmaRxIrq(void)
 {
-    HAL_DMA_IRQHandler(&s_hdma_rx);
+    /* LEGACY: USART6 RX DMA kancasiydi. Native USB-CDC portunda kullanilmiyor;
+       stm32f0xx_it.c bu fonksiyonu hic cagirmaz (no-op, ikili uyum icin durur). */
 }

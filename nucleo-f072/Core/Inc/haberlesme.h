@@ -12,21 +12,24 @@
   *
   *  Bu firmware CIFT YONLUDUR:
   *    - TX (STM -> Jetson): STATUS + HEARTBEAT telemetri
-  *    - RX (Jetson -> STM): COMMAND + HEARTBEAT  (DMA halka tampon + cozucu)
+  *    - RX (Jetson -> STM): COMMAND + HEARTBEAT  (halka tampon + cozucu)
   *  Gelen COMMAND dogrulanip JetsonKomut'a yazilir; bu SURUMDE surus/servo
   *  kontroluna BAGLANMAZ (yalniz alinir ve tazeligi izlenir). Motora uygulama
   *  (RC <-> AI arbitrasyonu) sonraki adimda main.c::Drive_Update'te yapilacak.
   *
-  *  DONANIM: bos olan USART6 kullanilir, full-duplex @115200 8N1.
-  *           TX = PC6 (AF8) -> Jetson RX ,  RX = PC7 (AF8) <- Jetson TX , GND ortak.
-  *           RX yolu: DMA2 Stream1 Kanal5 (dairesel).
+  *  DONANIM: native USB Full-Speed CDC (Virtual COM Port), F072 USB device IP.
+  *           PA11 = USB_DM , PA12 = USB_DP.  Jetson'da /dev/ttyACM* olarak gorunur.
+  *           TX -> CDC_Transmit_FS ; RX -> CDC_Receive_FS (USB IRQ) gelen baytlari
+  *           halka tampona yazar, Haberlesme_Poll() ana donguda bosaltir.
+  *           (F407 surumu ayni transport'u OTG_FS ile yapiyordu; onun oncesi
+  *            USART6 PC6/PC7 + DMA2 Stream1 idi.)
   ******************************************************************************
   */
 
 #ifndef HABERLESME_H
 #define HABERLESME_H
 
-#include "stm32f4xx_hal.h"
+#include "stm32f0xx_hal.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -97,8 +100,9 @@ typedef struct
 } JetsonKomut;
 
 /**
-  * @brief USART6 full-duplex (PC6 TX / PC7 RX) donanimini kurar, RX DMA'yi
-  *        baslatir ve tum sayaclari/durum makinesini sifirlar.
+  * @brief Protokol durum makinesini/sayaclarini ve RX halka tamponunu sifirlar.
+  *        USB (CDC) main icinde MX_USB_DEVICE_Init() ile ayrica baslatilir;
+  *        bu fonksiyon donanim kurmaz (USB-CDC'de gerekmez).
   */
 void Haberlesme_Init(void);
 
@@ -155,7 +159,15 @@ uint16_t Haberlesme_Kayip(void);
 bool Haberlesme_CrcHata(void);
 
 /**
-  * @brief DMA2 Stream1 (USART6 RX) kesme kancasi — stm32f4xx_it.c'den cagrilir.
+  * @brief CDC_Receive_FS (USB IRQ) tarafindan cagrilir: gelen USB baytlarini
+  *        RX halka tamponuna kopyalar (parse ana donguda Haberlesme_Poll'da).
+  */
+void Haberlesme_CdcRxPush(const uint8_t *data, uint32_t len);
+
+/**
+  * @brief (LEGACY) USART6 RX DMA kesme kancasi. Native USB-CDC portunda HIC
+  *        cagrilmaz (stm32f0xx_it.c bu sembole dokunmaz); yalniz eski protokol
+  *        koduyla ikili uyum icin no-op olarak korunur.
   */
 void Haberlesme_DmaRxIrq(void);
 

@@ -14,7 +14,9 @@ Read-only: consumes STATUS/HEARTBEAT, emits telemetry only, never COMMAND. It
 also does not manage the existing Jetson->STM heartbeat/autonomy traffic; that
 remains the responsibility of the (separate) vehicle autonomy process.
 
-Video is handled out-of-band by video_pipelines.py (RTP/UDP), never here.
+Video stays a separate plane (ffmpeg -> MediaMTX -> WebRTC), but its ON/OFF is
+driven from here: the CameraSupervisor streams only the cameras for the current
+STM `aktifMod` (DRIVE -> front+rear, LASER -> turret). Enabled via video.enabled.
 """
 from __future__ import annotations
 
@@ -27,22 +29,39 @@ from .config import load_config, GatewayConfig
 from .mapper import TelemetryMapper, now_ms
 from .quic_client import QuicTelemetryClient
 from .stm_reader import StmReader, TYPE_STATUS, TYPE_HEARTBEAT
+from .video_pipelines import CameraSupervisor
 
 log = logging.getLogger("jetson.gateway")
 
 
-async def _reader_task(reader: StmReader, mapper: TelemetryMapper, client: QuicTelemetryClient) -> None:
+async def _reader_task(
+    reader: StmReader,
+    mapper: TelemetryMapper,
+    client: QuicTelemetryClient,
+    supervisor: "CameraSupervisor | None" = None,
+) -> None:
     """Consume decoded STM packets; update the mapper; emit events immediately."""
     async for pkt in reader.packets():
         now = now_ms()
         if pkt["type"] == TYPE_STATUS and "status" in pkt:
             events = mapper.on_status(pkt["status"], pkt["seq"], now, reader.packets_lost)
+            # Drive the camera plane from the vehicle's real mode (CH5 -> aktifMod).
+            if supervisor is not None:
+                mode = "laser" if int(pkt["status"]["aktif_mod"]) == 1 else "drive"
+                supervisor.request_mode(mode, now)
             for ev in events:
                 client.send_event(ev)
         elif pkt["type"] == TYPE_HEARTBEAT and "heartbeat" in pkt:
             mapper.on_heartbeat(pkt["heartbeat"], now)
         # COMMAND or unknown types are ignored: the Base Station never consumes
         # or produces control traffic.
+
+
+async def _video_task(supervisor: "CameraSupervisor") -> None:
+    """Apply debounced mode switches and keep the active cameras alive (~2 Hz)."""
+    while True:
+        await supervisor.tick(now_ms())
+        await asyncio.sleep(0.5)
 
 
 async def _publisher_task(cfg: GatewayConfig, mapper: TelemetryMapper, client: QuicTelemetryClient) -> None:
@@ -82,16 +101,30 @@ async def run(config_path: str | None = None) -> None:
     mapper = TelemetryMapper(cfg.telemetry)
     client = QuicTelemetryClient(cfg.quic)
 
+    supervisor: CameraSupervisor | None = None
+    if cfg.video.enabled and cfg.video.cameras:
+        supervisor = CameraSupervisor(cfg.video)
+        log.info(
+            "video: mode-aware supervisor enabled (%d cameras; DRIVE=front+rear, LASER=turret)",
+            len(cfg.video.cameras),
+        )
+
     log.info("connecting to Base Station QUIC %s:%d", cfg.quic.host, cfg.quic.port)
     await client.start()
     log.info("connected; observing STM via %s source", cfg.source.type)
 
+    tasks = [
+        _reader_task(reader, mapper, client, supervisor),
+        _publisher_task(cfg, mapper, client),
+    ]
+    if supervisor is not None:
+        tasks.append(_video_task(supervisor))
+
     try:
-        await asyncio.gather(
-            _reader_task(reader, mapper, client),
-            _publisher_task(cfg, mapper, client),
-        )
+        await asyncio.gather(*tasks)
     finally:
+        if supervisor is not None:
+            await supervisor.stop_all()
         await client.stop()
 
 
