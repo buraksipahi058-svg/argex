@@ -218,6 +218,7 @@ chmod +x /root/start_video.sh
 /root/start_video.sh
 ```
 Her kamera için log **boşsa** = iyi. Hata görürsen Bölüm 7'ye bak.
+Kaydetmek (yarış sonu teslim) istersen → **Bölüm 9**.
 
 ---
 
@@ -308,6 +309,69 @@ Detay ve sorun giderme: [otonomicingerekenler.md](otonomicingerekenler.md).
 3. Tarayıcı → `http://localhost:5173`
 
 (IP'ler değişmediyse `.env.local`'a dokunmana gerek yok. Değiştiyse Bölüm 5.1.)
+
+---
+
+## 9. Kayıt (yarış sonu teslim)
+
+Kameraları kaydetmek için **MediaMTX'e kaydettir** — zaten kodlanmış yayını olduğu
+gibi diske yazar, **ekstra CPU/USB/Wi-Fi maliyeti yok**. Kayıt yalnız kamera
+yayındayken tutulur.
+
+### 9.1 Kayıt klasörü (bir kez)
+```bash
+sudo mkdir -p /opt/ugv-recordings && sudo chown $USER:$USER /opt/ugv-recordings
+```
+
+### 9.2 `mm.yml`'a kaydı ekle (bir kez)
+`/root/mm.yml`'ı kayıtlı sürümle değiştir:
+```bash
+cat > /root/mm.yml <<'EOF'
+pathDefaults:
+  record: yes
+  recordPath: /opt/ugv-recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordFormat: fmp4
+  recordSegmentDuration: 15m
+  recordDeleteAfter: 0
+paths:
+  all_others:
+EOF
+```
+Sonra kameraları yeniden başlat (script MediaMTX'i de yeniden başlatır):
+```bash
+/root/start_video.sh
+```
+Kayıtlar `/opt/ugv-recordings/cam_turret|cam_front|cam_rear/...` altına `.mp4`
+olarak düşer. Kontrol:
+```bash
+ls -R /opt/ugv-recordings/
+```
+
+### 9.3 Ne kadar yer kaplar? (1 Mbps ayarıyla)
+| Süre | 1 kamera | 3 kamera |
+|---|---|---|
+| 1 dk | 7.5 MB | 22.5 MB |
+| **15 dk** | 112 MB | **~340 MB** |
+| 1 saat | 450 MB | ~1.35 GB |
+
+Herhangi bir USB bellek/SD rahat alır. Daha yüksek kalite istersen `start_video.sh`
+içindeki `-b:v 1000k` değerini büyüt (ör. `4000k` → ~4 kat yer).
+
+### 9.4 Teslim — tek komutla USB'ye dök
+USB diski tak ve mount et, sonra:
+```bash
+sudo mkdir -p /media/ugv-usb && sudo mount /dev/sda1 /media/ugv-usb
+```
+```bash
+bash /root/argex/scripts/dump_recordings.sh /media/ugv-usb
+```
+Bu komut kayıtları diske kopyalar, dosya sayısını doğrular, `manifest.txt` yazar,
+`sync` eder ve diski **güvenle unmount eder** → çıkar, teslim et. (Diski exFAT
+formatla; `sda1` yerine kendi cihazını yaz — `lsblk -f` ile bul.)
+
+> USB diski hub'a takacaksan **beslemeli hub** kullan (Bölüm 7'deki `-110`
+> sorununun sebebi de bu). Yarış boyunca kayıt **dahili diske** düşer, USB'yi
+> sadece en sonda takıp dökmek en güvenlisidir.
 
 ---
 
