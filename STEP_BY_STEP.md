@@ -209,10 +209,43 @@ npm run dev                 # http://localhost:5173
 
 ---
 
-## BÖLÜM 6 — Kameralar (ayrı düzlem, opsiyonel)
+## BÖLÜM 6 — Kameralar (ayrı düzlem)
 
-Telemetriden bağımsız. Gateway kameraları **moda göre** açıp kapatır
-(`jetson/config.yaml` → `video.cameras[].modes`):
+Telemetriden bağımsız çalışır (ESP bozuk olsa bile kameralar gelir). İki yol var.
+
+### Yol A — Şu an çalışan / önerilen: `start_video.sh` (ESP'den bağımsız)
+En pratik yol; sahada bunu kullandık. MediaMTX + 3 kamerayı tek komutla başlatır.
+
+1. **MediaMTX kurulu değilse** indir (bir kez, Jetson internete bağlı):
+   ```bash
+   cd /root && url=$(wget -qO- https://api.github.com/repos/bluenviron/mediamtx/releases/latest | grep -o 'https://[^"]*linux_arm64\.tar\.gz' | head -1) && wget -q "$url" -O mediamtx.tar.gz && tar xzf mediamtx.tar.gz mediamtx
+   ```
+2. **MediaMTX ayarı** `/root/mm.yml` (bir kez) — kayıt istiyorsan `record: yes` ile:
+   ```bash
+   cat > /root/mm.yml <<'EOF'
+   pathDefaults:
+     record: yes
+     recordPath: /opt/ugv-recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+     recordFormat: fmp4
+     recordSegmentDuration: 15m
+     recordDeleteAfter: 0s
+   paths:
+     all_others:
+   EOF
+   ```
+   > Kayıt istemiyorsan sadece `printf 'paths:\n  all_others:\n' > /root/mm.yml` yeter.
+   > Kayıt klasörü: `sudo mkdir -p /opt/ugv-recordings && sudo chown $USER:$USER /opt/ugv-recordings`
+3. **Başlat** (her açılışta tek komut):
+   ```bash
+   /root/argex/scripts/start_video.sh
+   ```
+   Bu: eski MediaMTX/ffmpeg'i durdurur → MediaMTX'i başlatır → 3 kamerayı (turret+front+rear)
+   push eder. Kameralar `v4l2-ctl` ile sabit kimlikten bulunur (video numarası kaysa da).
+   Eski kayıtları da silmek için: `start_video.sh --temizle` (onaylı).
+4. **Frontend** (laptop): `.env.local` → `VITE_CAMERA_HOST=<JETSON_IP>`, sonra `npm run dev -- --host`.
+
+### Yol B — Tasarlanmış: gateway'in mod-farkında yönetimi (ESP telemetri çalışınca)
+Gateway kameraları araç moduna göre açıp kapatır (`jetson/config.yaml` → `video.cameras[].modes`):
 
 | Araç modu | Yayındaki kameralar |
 |---|---|
@@ -220,10 +253,13 @@ Telemetriden bağımsız. Gateway kameraları **moda göre** açıp kapatır
 | LASER | turret |
 | AUTO | turret + front |
 
-- Aynı anda en fazla **2** kamera açık kalır (USB isochronous bütçesi + Wi-Fi bandı).
-- Jetson: `./mediamtx &`, gateway ffmpeg push'ları kendi yönetir.
-- Frontend: `.env.local` içinde `VITE_CAMERA_HOST=<JETSON_IP>`.
-- Komutları çalıştırmadan görmek için: `python3 -m jetson.video_pipelines --print`.
+- Aynı anda en fazla **2** kamera (USB isochronous bütçesi + Wi-Fi bandı).
+- `video.enabled: true` iken gateway ffmpeg push'ları kendi yönetir (Bölüm 3'teki gateway).
+- Komutları çalıştırmadan görmek: `python3 -m jetson.video_pipelines --print`.
+- Bu yol ESP telemetrisine (aktifMod) bağlıdır; ESP hattı çalışmadan mod geçişi olmaz.
+
+> Sıfırdan tam kurulum ve sorun giderme: [SIFIRDAN-BASLATMA.md](SIFIRDAN-BASLATMA.md).
+> Kayıtları yarış sonu USB'ye tek komutla dökmek: [scripts/dump_recordings.sh](scripts/dump_recordings.sh).
 
 ---
 
