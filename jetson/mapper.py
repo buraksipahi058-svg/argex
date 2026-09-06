@@ -3,6 +3,8 @@ Map decoded STM STATUS/HEARTBEAT packets -> Base Station protobuf telemetry.
 
 This is where the "structured vehicle data" is produced. It:
   * copies real STATUS/HEARTBEAT fields 1:1 into the schema (no invented fields),
+  * decodes the two ESP32-only durum bits (ARMED 0x20, HW_ERROR 0x40) that the
+    frozen parser does not name, straight from the raw `durum` byte,
   * derives link health deterministically (rates, SEQ loss, freshness),
   * detects events by diffing consecutive STATUS packets, keeping the distinct
     link/failure concepts strictly separate:
@@ -26,8 +28,27 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-_ACTIVE_MODE = {0: pb.ACTIVE_MODE_DRIVE, 1: pb.ACTIVE_MODE_LASER}
-_MODE_NAME = {0: "DRIVE", 1: "LASER"}
+_ACTIVE_MODE = {
+    0: pb.ACTIVE_MODE_DRIVE,        # MODE_MANUAL_DRIVE
+    1: pb.ACTIVE_MODE_LASER,        # MODE_MANUAL_TURRET (servo + laser)
+    2: pb.ACTIVE_MODE_AUTONOMOUS,   # MODE_AUTONOMOUS (CH8; Jetson drives everything)
+}
+_MODE_NAME = {0: "DRIVE", 1: "LASER", 2: "AUTO"}
+
+# Two STATUS.durum bits the ESP32 controller sets that the frozen reference
+# parser predates. needtocheck/jetson_parser.py is deliberately NOT edited (see
+# stm_reader.py), so we decode them here from the verbatim `durum` byte it
+# already hands us.
+ST_ARMED = 0x20
+ST_HW_ERROR = 0x40
+
+
+def _armed(s: Dict) -> bool:
+    return bool(int(s["durum"]) & ST_ARMED)
+
+
+def _hw_error(s: Dict) -> bool:
+    return bool(int(s["durum"]) & ST_HW_ERROR)
 
 
 class _Ewma:
@@ -99,6 +120,8 @@ class TelemetryMapper:
             failsafe_active=bool(s["failsafe"]),
             crc_error_recent=bool(s["crc_err"]),
             raw_durum=int(s["durum"]),
+            motor_armed=_armed(s),
+            hw_error=_hw_error(s),
         )
         self._have_status = True
 
@@ -211,6 +234,12 @@ class TelemetryMapper:
         # Command timeout (durum.CMD_TIMEOUT)
         self._edge(events, now, prev["cmd_timeout"], s["cmd_timeout"],
                    pb.EVENT_CMD_TIMEOUT_SET, pb.EVENT_CMD_TIMEOUT_CLEARED, s["durum"])
+        # Motor arming interlock (durum.ARMED) -- ESP32 only
+        self._edge(events, now, _armed(prev), _armed(s),
+                   pb.EVENT_MOTOR_ARMED, pb.EVENT_MOTOR_DISARMED, s["durum"])
+        # Latched controller hardware fault (durum.HW_ERROR) -- ESP32 only
+        self._edge(events, now, _hw_error(prev), _hw_error(s),
+                   pb.EVENT_HW_ERROR_SET, pb.EVENT_HW_ERROR_CLEARED, s["durum"])
 
         # CRC error (durum.CRC_ERR) -- rising edge only, debounced
         if s["crc_err"] and not prev["crc_err"]:

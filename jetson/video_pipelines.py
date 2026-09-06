@@ -5,15 +5,19 @@ USB cameras on the Jetson are software-encoded (low-latency x264) and pushed
 over RTSP to the on-Jetson MediaMTX, which bridges them to WebRTC/WHEP for the
 Base Station. This video plane is SEPARATE from the QUIC/Protobuf telemetry.
 
-Only the cameras for the CURRENT vehicle mode stream at any time:
+Only the cameras for the CURRENT vehicle mode stream at any time. Which camera
+belongs to which mode is config (`video.cameras[].modes`); the shipped mapping is:
     DRIVE  -> front + rear
     LASER  -> turret
-The mode comes from the STM `aktifMod` telemetry (CH5 on the transmitter). The
-gateway calls `request_mode()` on every STATUS and the supervisor switches
-camera sets automatically (stop the old set first, then start the new one).
+    AUTO   -> turret + front   (aim view + where the vehicle is heading)
+The mode comes from the controller's `aktifMod` telemetry: CH5 picks DRIVE/LASER
+and CH8 overrides both with AUTO. The gateway calls `request_mode()` on every
+STATUS and the supervisor switches camera sets automatically (stop the old set
+first, then start the new one).
 
 Why one set at a time:
-  * Wi-Fi at ~100 m cannot carry 3x1 Mbps; a single mode's set fits.
+  * Wi-Fi at ~100 m cannot carry 3x1 Mbps; a single mode's set fits. Keep every
+    mode's set at two cameras or fewer -- the supervisor warns if one exceeds it.
   * The shared USB bus runs out of isochronous bandwidth with three cameras
     streaming at once (VIDIOC_STREAMON -> "No space left on device"); capping at
     two simultaneous avoids it. Switching stops-before-starting for the same
@@ -24,7 +28,7 @@ so we encode on the CPU with x264 via ffmpeg.
 
 Standalone (testing, without the gateway):
     python -m jetson.video_pipelines --print [config.yaml]        # print commands
-    python -m jetson.video_pipelines --mode=drive [config.yaml]   # run a set
+    python -m jetson.video_pipelines --mode=drive [config.yaml]   # drive|laser|auto
 """
 from __future__ import annotations
 
@@ -32,7 +36,7 @@ import asyncio
 import logging
 import sys
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from .config import CameraConfig, VideoConfig, load_config
 
@@ -70,13 +74,29 @@ def build_ffmpeg_cmd(cam: CameraConfig, video: VideoConfig) -> List[str]:
     ]
 
 
-def _mode_of(cam: CameraConfig) -> str:
-    return (cam.mode or "drive").lower()
+MODES = ("drive", "laser", "auto")
+MAX_CONCURRENT_CAMS = 2
 
 
 def _norm_mode(mode: str) -> str:
-    """Only two modes exist here; anything not 'laser' falls back to 'drive'."""
-    return "laser" if str(mode).lower() == "laser" else "drive"
+    """Map anything unrecognised onto the safe default (the drive view)."""
+    m = str(mode).lower()
+    return m if m in MODES else "drive"
+
+
+def _modes_of(cam: CameraConfig) -> Set[str]:
+    """The vehicle modes this camera streams in.
+
+    `modes: [laser, auto]` is the current form; a bare `mode: laser` is still
+    accepted so older configs keep working.
+    """
+    raw = cam.modes if cam.modes else [cam.mode or "drive"]
+    return {_norm_mode(m) for m in raw}
+
+
+def _mode_of(cam: CameraConfig) -> str:
+    """Single label for logs/--print: the camera's modes, comma-joined."""
+    return ",".join(sorted(_modes_of(cam)))
 
 
 class CameraSupervisor:
@@ -101,6 +121,15 @@ class CameraSupervisor:
         self._requested_at = 0
         self._last_request_ms = 0
 
+        for mode in MODES:
+            names = self.cams_for(mode)
+            if len(names) > MAX_CONCURRENT_CAMS:
+                log.warning(
+                    "video: mode %s selects %d cameras (%s); the USB isochronous "
+                    "budget and the Wi-Fi link only fit %d -- expect ENOSPC",
+                    mode, len(names), ", ".join(sorted(names)), MAX_CONCURRENT_CAMS,
+                )
+
     # ---- called from the reader task on every STATUS ----------------------
     def request_mode(self, mode: str, now_ms: int) -> None:
         mode = _norm_mode(mode)
@@ -109,8 +138,9 @@ class CameraSupervisor:
             self._requested_mode = mode
             self._requested_at = now_ms
 
-    def _cams_for(self, mode: str) -> List[str]:
-        return [n for n, c in self._cams.items() if _mode_of(c) == mode]
+    def cams_for(self, mode: str) -> List[str]:
+        """Camera names that stream in `mode` (public: the gateway logs these)."""
+        return [n for n, c in self._cams.items() if _norm_mode(mode) in _modes_of(c)]
 
     # ---- periodic: apply debounced mode + restart dead pushers ------------
     async def tick(self, now_ms: int) -> None:
@@ -129,7 +159,7 @@ class CameraSupervisor:
 
     async def set_mode(self, mode: str) -> None:
         mode = _norm_mode(mode)
-        want = set(self._cams_for(mode))
+        want = set(self.cams_for(mode))
         # STOP unwanted cameras FIRST (release the USB bus before adding any new
         # stream), THEN start the wanted set.
         for name in list(self._procs.keys()):
@@ -174,7 +204,7 @@ class CameraSupervisor:
         log.info("video: stopped cam_%s", name)
 
     async def _restart_dead(self) -> None:
-        for name in self._cams_for(self._active_mode or ""):
+        for name in self.cams_for(self._active_mode or ""):
             proc = self._procs.get(name)
             if proc is not None and proc.returncode is not None:
                 log.warning("video: cam_%s exited (rc=%s); restarting", name, proc.returncode)
@@ -207,7 +237,7 @@ def main() -> None:
     mode = "drive"
     for a in sys.argv:
         if a.startswith("--mode="):
-            mode = a.split("=", 1)[1]
+            mode = _norm_mode(a.split("=", 1)[1])
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 

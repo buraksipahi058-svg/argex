@@ -16,7 +16,8 @@ remains the responsibility of the (separate) vehicle autonomy process.
 
 Video stays a separate plane (ffmpeg -> MediaMTX -> WebRTC), but its ON/OFF is
 driven from here: the CameraSupervisor streams only the cameras for the current
-STM `aktifMod` (DRIVE -> front+rear, LASER -> turret). Enabled via video.enabled.
+controller `aktifMod` (DRIVE -> front+rear, LASER -> turret, AUTO -> turret+front).
+Enabled via video.enabled; the per-mode camera sets live in config.yaml.
 """
 from __future__ import annotations
 
@@ -33,6 +34,11 @@ from .video_pipelines import CameraSupervisor
 
 log = logging.getLogger("jetson.gateway")
 
+# STATUS.aktifMod (ESP32 VehicleMode) -> camera plane. Mode 2 is AUTONOMOUS,
+# where the vehicle both drives and aims under Jetson command, so it gets its
+# own plane rather than being folded into the drive view.
+_MODE_PLANE = {0: "drive", 1: "laser", 2: "auto"}
+
 
 async def _reader_task(
     reader: StmReader,
@@ -45,10 +51,11 @@ async def _reader_task(
         now = now_ms()
         if pkt["type"] == TYPE_STATUS and "status" in pkt:
             events = mapper.on_status(pkt["status"], pkt["seq"], now, reader.packets_lost)
-            # Drive the camera plane from the vehicle's real mode (CH5 -> aktifMod).
+            # Drive the camera plane from the vehicle's real mode
+            # (CH5 -> DRIVE/LASER, CH8 -> AUTO; both land in aktifMod).
             if supervisor is not None:
-                mode = "laser" if int(pkt["status"]["aktif_mod"]) == 1 else "drive"
-                supervisor.request_mode(mode, now)
+                plane = _MODE_PLANE.get(int(pkt["status"]["aktif_mod"]), "drive")
+                supervisor.request_mode(plane, now)
             for ev in events:
                 client.send_event(ev)
         elif pkt["type"] == TYPE_HEARTBEAT and "heartbeat" in pkt:
@@ -105,8 +112,12 @@ async def run(config_path: str | None = None) -> None:
     if cfg.video.enabled and cfg.video.cameras:
         supervisor = CameraSupervisor(cfg.video)
         log.info(
-            "video: mode-aware supervisor enabled (%d cameras; DRIVE=front+rear, LASER=turret)",
+            "video: mode-aware supervisor enabled (%d cameras; %s)",
             len(cfg.video.cameras),
+            "; ".join(
+                f"{m.upper()}={','.join(sorted(supervisor.cams_for(m))) or 'none'}"
+                for m in ("drive", "laser", "auto")
+            ),
         )
 
     log.info("connecting to Base Station QUIC %s:%d", cfg.quic.host, cfg.quic.port)

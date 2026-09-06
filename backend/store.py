@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS telemetry_frames (
     cmd_timeout INTEGER, auto_active INTEGER,
     failsafe INTEGER, crc_err INTEGER,
     packets_lost INTEGER, status_rate_hz REAL,
-    stm_uptime_ms INTEGER, stm_status_fresh INTEGER
+    stm_uptime_ms INTEGER, stm_status_fresh INTEGER,
+    motor_armed INTEGER, hw_error INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_frames_ts ON telemetry_frames(ts_ms);
 
@@ -40,6 +41,16 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts_ms);
 """
+
+# Columns added after the first databases were created. SQLite has no
+# "ADD COLUMN IF NOT EXISTS", so we check the table's own schema first; an
+# existing telemetry.db is upgraded in place instead of being thrown away.
+_MIGRATIONS = {
+    "telemetry_frames": {
+        "motor_armed": "INTEGER",   # STATUS.durum & 0x20 (ESP32 arming interlock)
+        "hw_error": "INTEGER",      # STATUS.durum & 0x40 (latched controller fault)
+    },
+}
 
 
 class Store:
@@ -54,7 +65,18 @@ class Store:
         self._db = await aiosqlite.connect(self._cfg.db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(_SCHEMA)
+        await self._migrate()
         await self._db.commit()
+
+    async def _migrate(self) -> None:
+        """Add columns missing from an older telemetry.db (idempotent)."""
+        assert self._db is not None
+        for table, columns in _MIGRATIONS.items():
+            cur = await self._db.execute(f"PRAGMA table_info({table})")
+            have = {row["name"] for row in await cur.fetchall()}
+            for name, decl in columns.items():
+                if name not in have:
+                    await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     async def close(self) -> None:
         if self._db:
@@ -73,8 +95,9 @@ class Store:
             """INSERT INTO telemetry_frames
                (ts_ms, seq, left_motor, right_motor, pan, tilt, laser, mode,
                 elrs_link, jetson_link, cmd_timeout, auto_active, failsafe, crc_err,
-                packets_lost, status_rate_hz, stm_uptime_ms, stm_status_fresh)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                packets_lost, status_rate_hz, stm_uptime_ms, stm_status_fresh,
+                motor_armed, hw_error)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 f["ts_ms"], f["seq"],
                 f["left_motor"], f["right_motor"], f["pan"], f["tilt"],
@@ -84,6 +107,7 @@ class Store:
                 int(f["failsafe"]), int(f["crc_err"]),
                 f["packets_lost"], f["status_rate_hz"],
                 f["stm_uptime_ms"], int(f["stm_status_fresh"]),
+                int(f["motor_armed"]), int(f["hw_error"]),
             ),
         )
         await self._db.commit()

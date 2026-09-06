@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
 """
-Jetson<->STM RX bring-up testi (SERI HAT, gercek donanim).
+Jetson<->ESP32 cift yonlu bring-up testi (SERI HAT, gercek donanim).
 
-STM'e COMMAND + HEARTBEAT gonderir ve STM'in geri yolladigi STATUS
-telemetrisindeki `jetson_link` bitini 1 Hz canli izler:
-    - Once ~3 sn SADECE dinler  -> jetson_link=False olmali (STM bizi duymuyor)
-    - Sonra gondermeye baslar    -> jetson_link 500 ms icinde True olmali
-Boylece Jetson->STM yolu (PC7 = USART6_RX) + COMMAND parser dogrulanir.
+TEK KOMUTLA IKI YONU BIRDEN dogrular:
+    1) Ilk ~3 sn SADECE dinler.
+       STATUS akiyorsa  -> ESP32 -> Jetson yonu CALISIYOR (20 Hz telemetri).
+       jetson_link=False olmali (ESP32 henuz bizi duymuyor).
+    2) Sonra COMMAND + HEARTBEAT gonderir (10 Hz).
+       jetson_link 500 ms icinde True olmali -> Jetson -> ESP32 yonu CALISIYOR.
+       (Bu biti ESP32'nin KENDISI set eder; bizden geleni duydugunun kanitidir.)
 
-Kablolama (CAPRAZ, 3.3V):
-    Jetson/adapter GND -> STM GND
-    Jetson/adapter TX  -> STM PC7   (USART6_RX)   <-- bu yeni yon; takili mi?
-    Jetson/adapter RX  -> STM PC6   (USART6_TX)
+Arac hareket etmez: sol=sag=0, AUTO_REQ gonderilmez.
+
+Kablolama (CAPRAZ, 3.3V, seviye cevirici GEREKMEZ) -- ika_esp32 config.h:
+    USB-TTL GND -> ESP32 GND
+    USB-TTL TX  -> ESP32 GPIO21   (JETSON_RX_PIN)
+    USB-TTL RX  <- ESP32 GPIO22   (JETSON_TX_PIN)
+    USB-TTL VCC/3V3/5V -> BAGLANMAZ
+
+ESP32'nin kendi USB portu ayri bir cihazdir (flash + Seri Monitor); protokol
+oradan akmaz, bu testi USB-TTL'in portuna baglayin.
 
 Kullanim:
-    python3 sim/jetson_link_test.py /dev/ttyTHS1   # Jetson dahili UART
-    python  sim/jetson_link_test.py COM7           # Windows USB-TTL
+    python3 sim/jetson_link_test.py /dev/ttyUSB0   # Jetson, USB-TTL
+    python  sim/jetson_link_test.py COM22          # Windows, USB-TTL
 
 Gereksinim:  pip install pyserial  (Jetson: apt install python3-serial)
 """
@@ -39,10 +47,15 @@ _spec.loader.exec_module(_p)
 Protocol = _p.Protocol
 TYPE_STATUS = _p.TYPE_STATUS
 
+# ESP32'nin donmus parser'da adi gecmeyen iki durum biti (controller.cpp).
+ST_ARMED = 0x20
+ST_HW_ERROR = 0x40
+MODE_NAMES = {0: "DRIVE", 1: "LASER", 2: "AUTO"}
+
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Jetson->STM RX bring-up testi")
-    ap.add_argument("port", help="seri port (/dev/ttyTHS1, COM7, /dev/ttyUSB0)")
+    ap = argparse.ArgumentParser(description="Jetson->ESP32 RX bring-up testi")
+    ap.add_argument("port", help="seri port (/dev/ttyUSB0, COM22)")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--listen", type=float, default=3.0,
                     help="gondermeden once yalniz dinleme suresi (sn)")
@@ -89,14 +102,18 @@ def main() -> None:
                 status_prev = status_total
                 phase = "GONDERIYOR" if sending else "dinliyor"
                 if last_status is None:
-                    print(f"[{now - t0:5.1f}s] STM'den STATUS YOK (+{rate}/s)  [{phase}]  "
-                          f"-> PC6->Jetson RX / GND / baud / firmware kontrol")
+                    print(f"[{now - t0:5.1f}s] ESP32'den STATUS YOK (+{rate}/s)  [{phase}]  "
+                          f"-> GPIO22->USB-TTL RX / GND / baud / firmware kontrol")
                 else:
                     link = last_status["jetson_link"]
                     mark = "   <== BASARILI (RX calisiyor)" if (sending and link) else ""
+                    durum = last_status["durum"]
                     print(f"[{now - t0:5.1f}s] STATUS +{rate}/s  "
                           f"jetson_link={link!s:5}  "
-                          f"durum=0x{last_status['durum']:02X}  "
+                          f"mod={MODE_NAMES.get(last_status['aktif_mod'], '?'):6s} "
+                          f"arm={bool(durum & ST_ARMED)!s:5} "
+                          f"hw={bool(durum & ST_HW_ERROR)!s:5} "
+                          f"durum=0x{durum:02X}  "
                           f"kayip={proto.lost}  [{phase}]{mark}")
 
             time.sleep(0.005)

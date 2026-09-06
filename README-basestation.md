@@ -5,8 +5,8 @@ Read-only monitoring system for the TEKNOFEST unmanned ground vehicle. It
 cameras — it can **never** actuate the vehicle.
 
 ```
-STM32 ──UART v1 @115200 (FROZEN)──► Jetson gateway (observer) ─┬─ TELEMETRY  Protobuf/QUIC ─► Backend ─► SQLite + WebSocket(JSON) ─► React UI
-                                                               └─ VIDEO      3× H.264/RTP ─► MediaMTX (WebRTC/WHEP) ─► React UI
+ESP32 ──UART v1 @115200 (FROZEN)──► Jetson gateway (observer) ─┬─ TELEMETRY  Protobuf/QUIC ─► Backend ─► SQLite + WebSocket(JSON) ─► React UI
+                                                               └─ VIDEO      2-of-3 H.264/RTSP ─► MediaMTX (WebRTC/WHEP) ─► React UI
 ```
 
 Two **independent data planes**: telemetry (QUIC + Protobuf) and video
@@ -18,15 +18,21 @@ Two **independent data planes**: telemetry (QUIC + Protobuf) and video
 
 The existing firmware/protocol in [`needtocheck/`](needtocheck/) is treated as an
 external hardware API. Nothing there is edited, refactored, or renamed. The
-Python parser is **imported unmodified** by the gateway and the simulator.
+Python parser is **imported unmodified** by the gateway and the simulator — the
+ESP32 controller emits byte-identical frames, so it kept working across the
+STM32 → ESP32 move.
 
-| STM32↔Jetson protocol | value |
+| Controller↔Jetson protocol | value |
 |---|---|
-| Link | STM USART3 (PB10/PB11) ↔ Jetson `/dev/ttyTHS1`, **115200 8N1** |
+| Link | ESP32 UART1, GPIO21 (RX) / GPIO22 (TX) → 3.3 V USB-TTL → Jetson `/dev/ttyUSB*`, **115200 8N1** |
 | Frame | `AA 55 | VER | TYPE | LEN | SEQ | PAYLOAD | CRC16-CCITT` (little-endian) |
-| STATUS @20 Hz | `solMotor, sagMotor, pan, tilt, lazer, aktifMod(0=drive/1=laser), elrsLink, durum` |
-| `durum` bits | JETSON_LINK, CMD_TIMEOUT, AUTO_EN, FAILSAFE, CRC_ERR |
-| HEARTBEAT @10 Hz | `kaynak(0=STM/1=Jetson), uptime_ms` |
+| STATUS @20 Hz | `solMotor, sagMotor, pan, tilt, lazer, aktifMod(0=drive/1=laser/2=autonomous), elrsLink, durum` |
+| `durum` bits | JETSON_LINK, CMD_TIMEOUT, AUTO_EN, FAILSAFE, CRC_ERR, **ARMED (0x20)**, **HW_ERROR (0x40)** |
+| HEARTBEAT @10 Hz | `kaynak(0=controller/1=Jetson), uptime_ms` |
+
+The last two `durum` bits postdate the frozen parser, which does not name them.
+Rather than edit it, [`jetson/mapper.py`](jetson/mapper.py) decodes them from the
+verbatim `durum` byte the parser already hands over.
 
 Every telemetry field maps 1:1 from a real byte — see the traceability table in
 [`proto/telemetry.proto`](proto/telemetry.proto). **No invented fields**
@@ -34,15 +40,16 @@ Every telemetry field maps 1:1 from a real byte — see the traceability table i
 
 ### Read-only guarantees
 - `telemetry.proto` has **no command message**; the backend QUIC endpoint only receives; the UI has no control affordance.
-- The Jetson gateway only **decodes** (`Protocol.feed`); it never builds COMMAND and never writes to the STM. It also does not disable the existing Jetson→STM heartbeat/autonomy traffic the firmware relies on.
-- The Base Station is **not in the vehicle safety loop**: if any part of it dies, the vehicle continues under the existing STM32/Jetson logic.
+- The Jetson gateway only **decodes** (`Protocol.feed`); it never builds COMMAND and never writes to the controller. It also does not disable the existing Jetson→controller heartbeat/autonomy traffic the firmware relies on.
+- The Base Station is **not in the vehicle safety loop**: if any part of it dies, the vehicle continues under the existing ESP32/Jetson logic.
+- The serial port takes a single owner. When the autonomy bridge also runs on the Jetson, put the gateway on `source.type: udp` and have the bridge re-publish raw frames to `127.0.0.1:9000` instead of opening the port twice.
 
 ### Distinct link/failure states (never conflated)
 | concept | source |
 |---|---|
 | ELRS (RC) link | `STATUS.elrsLink` field |
-| STM↔Jetson (STM's view) | `STATUS.durum & JETSON_LINK` |
-| STM telemetry stale | gateway: STATUS stopped arriving |
+| ESP32↔Jetson (controller's view) | `STATUS.durum & JETSON_LINK` |
+| Controller telemetry stale | gateway: STATUS stopped arriving |
 | Base link | backend: gateway QUIC/heartbeat gap |
 | Server link | browser↔backend WebSocket |
 
@@ -60,9 +67,10 @@ rewritten or fabricated.
 | `gen/telemetry_pb2.py` | generated stubs (`python scripts/gen_proto.py`) |
 | `jetson/` | vehicle-side observer: reader → mapper → QUIC client + video pipelines |
 | `backend/` | receive-only QUIC server → SQLite → WebSocket + read-only REST |
-| `mediamtx/mediamtx.yml` | WebRTC bridge for the 3 cameras |
+| `mediamtx/mediamtx.yml` | WebRTC bridge for the cameras |
 | `src/` | React dashboard (WebSocket telemetry + WHEP video) |
 | `sim/fake_stm.py` | emits valid STATUS/HEARTBEAT for hardware-free testing |
+| `sim/jetson_link_test.py` | on-hardware bring-up: proves both link directions |
 | `common/` | shared QUIC/framing helpers |
 
 Telemetry rates are configurable in `jetson/config.yaml`:
@@ -91,7 +99,7 @@ Start the pieces (each in its own terminal), from the repo root:
 # 2) Jetson gateway (observer). Default source is UDP for the simulator.
 .venv/Scripts/python -m jetson.gateway
 
-# 3) Fake STM (only for testing without the vehicle)
+# 3) Fake controller (only for testing without the vehicle)
 .venv/Scripts/python sim/fake_stm.py
 
 # 4) Frontend
@@ -102,9 +110,12 @@ mediamtx mediamtx/mediamtx.yml
 gst-launch-1.0 videotestsrc ! x264enc tune=zerolatency ! rtspclientsink location=rtsp://127.0.0.1:8554/cam_front
 ```
 
-On the real vehicle: set `source.type: serial` in `jetson/config.yaml`, run the
-gateway on the Jetson (`quic.host` = base station), and launch
-`python -m jetson.video_pipelines` (needs GStreamer + NVENC).
+On the real vehicle: set `source.type: serial` and the USB-TTL port
+(`/dev/ttyUSB0`, or a `by-id` path) in `jetson/config.yaml`, and run the gateway
+on the Jetson (`quic.host` = base station). Video is started by the gateway
+itself when `video.enabled: true` (ffmpeg/x264 → MediaMTX); the cameras follow
+the vehicle mode — DRIVE: front+rear, LASER: turret, AUTO: turret+front. Step by
+step, wiring included: [`STEP_BY_STEP.md`](STEP_BY_STEP.md).
 
 ---
 
@@ -120,6 +131,8 @@ curl http://127.0.0.1:8080/api/history/events?limit=20
 Semantic checks (kill processes to observe distinct states):
 - stop `fake_stm` → `STM_TELEMETRY_STALE` event, base link stays **up**;
 - stop `jetson.gateway` → `BASE_LINK_LOST` event (backend-derived);
-- during the sim's ELRS window → `ELRS_LINK_LOST` (a *field* event, distinct from the above).
+- during the sim's ELRS window → `ELRS_LINK_LOST` (a *field* event, distinct from the above);
+- the sim also walks DRIVE → AUTO → LASER and pulses the arming and hardware-fault
+  bits, so `MODE_CHANGED`, `MOTOR_ARMED`/`MOTOR_DISARMED` and `HW_ERROR_SET` all appear.
 
 REST is read-only; there is no control endpoint anywhere.

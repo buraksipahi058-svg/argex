@@ -5,7 +5,7 @@ import { CAMERAS } from './config';
 
 /* ============================================================
    TEKNOFEST İNSANSIZ KARA ARACI — BASE STATION (READ-ONLY)
-   Shows ONLY fields that exist in the STM32<->Jetson protocol.
+   Shows ONLY fields that exist in the ESP32<->Jetson protocol.
    Live data via backend WebSocket; video via WebRTC (WHEP).
    ============================================================ */
 
@@ -119,8 +119,13 @@ const LinkRow = ({ label, up, meta, unknown = false }) => (
 const VehicleControlPanel = ({ telemetry, stale }) => {
   const c = telemetry?.control;
   const s = telemetry?.status;
-  const modeColor = c?.mode === 'LASER' ? C.modeLaser : c?.mode === 'DRIVE' ? C.accent : C.textMuted;
+  const MODE_COLOR = { LASER: C.modeLaser, DRIVE: C.accent, AUTO: C.modeAuto };
+  const modeColor = MODE_COLOR[c?.mode] ?? C.textMuted;
+  // aktifMod === AUTO means CH8 handed authority to the Jetson; autonomous_active
+  // (durum.AUTO_EN) means the firmware actually accepted it. They can disagree:
+  // AUTO + not engaged = the vehicle is waiting on a fresh AUTO_REQ command.
   const opAuto = !!s?.autonomous_active;
+  const autoPending = c?.mode === 'AUTO' && !opAuto;
   return (
     <Card title="VEHICLE CONTROL" tag="STATUS" accent={C.accent} dim={stale}>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, padding: '5px 7px', background: C.bgInner, border: `1px solid ${C.border}`, borderRadius: 3 }}>
@@ -130,8 +135,8 @@ const VehicleControlPanel = ({ telemetry, stale }) => {
         </div>
         <div>
           <div style={{ fontSize: 8, color: C.textMuted, letterSpacing: '0.12em', fontWeight: 700 }}>OPERATION</div>
-          <div style={{ fontSize: 13, fontWeight: 700, color: opAuto ? C.modeAuto : C.modeManual, fontFamily: MONO }}>
-            {c ? (opAuto ? 'AUTONOMOUS' : 'MANUAL') : '—'}
+          <div style={{ fontSize: 13, fontWeight: 700, color: opAuto ? C.modeAuto : autoPending ? C.warn : C.modeManual, fontFamily: MONO }}>
+            {c ? (opAuto ? 'AUTONOMOUS' : autoPending ? 'AUTO PENDING' : 'MANUAL') : '—'}
           </div>
         </div>
       </div>
@@ -176,11 +181,11 @@ const LinksPanel = ({ telemetry, conn, wsConnected }) => {
         {/* Gateway <-> Backend (backend-derived) */}
         <LinkRow label="Jetson Gateway Link" up={conn.base_link_up} meta="gateway ↔ base (QUIC)" unknown={!wsConnected} />
         {/* STATUS freshness (gateway-derived) */}
-        <LinkRow label="STM Telemetry" up={conn.stm_status_fresh} meta={l ? `last STATUS ${fmtTs(l.last_status_unix_ms)}` : 'stream'} unknown={!known} />
+        <LinkRow label="ESP32 Telemetry" up={conn.stm_status_fresh} meta={l ? `last STATUS ${fmtTs(l.last_status_unix_ms)}` : 'stream'} unknown={!known} />
         {/* RC/ELRS link — vehicle FIELD */}
         <LinkRow label="ELRS (RC) Link" up={!!s?.elrs_link_up} meta="STATUS.elrsLink" unknown={!known} />
-        {/* STM's view of STM<->Jetson link — durum bit */}
-        <LinkRow label="STM ↔ Jetson (STM view)" up={!!s?.jetson_link_up} meta="durum.JETSON_LINK" unknown={!known} />
+        {/* The controller's own view of the ESP32<->Jetson link — durum bit */}
+        <LinkRow label="ESP32 ↔ Jetson (araç görüşü)" up={!!s?.jetson_link_up} meta="durum.JETSON_LINK" unknown={!known} />
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, paddingTop: 4, borderTop: `1px solid ${C.border}` }}>
         <Row label="Paket Kaybı" value={l ? l.packets_lost_total : '—'} valueColor={l?.packets_lost_total ? C.warn : C.textPrimary} />
@@ -207,9 +212,26 @@ const SafetyPanel = ({ telemetry, stale }) => {
       </div>
     );
   };
+  // Arming is a state, not a fault: DISARMED is the correct, safe reading in
+  // turret mode and right after any mode change, so it gets a neutral row
+  // instead of the red/green fault treatment.
+  const neutral = (label, active, activeText, inactiveText) => {
+    const color = active ? C.accent : C.textMuted;
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 7px', background: active ? C.accentBg : C.bgInner, border: `1px solid ${color}44`, borderRadius: 3 }}>
+        <Dot color={color} size={7} />
+        <span style={{ fontSize: 9, color: C.textLabel, fontFamily: MONO, letterSpacing: '0.1em', fontWeight: 700 }}>{label}</span>
+        <span style={{ marginLeft: 'auto', fontSize: 10, color, fontFamily: MONO, letterSpacing: '0.08em', fontWeight: 700 }}>
+          {s ? (active ? activeText : inactiveText) : '—'}
+        </span>
+      </div>
+    );
+  };
   return (
-    <Card title="SAFETY (REPORTED)" tag="STM" accent={C.fail} dim={stale}>
+    <Card title="SAFETY (REPORTED)" tag="VEHICLE" accent={C.fail} dim={stale}>
       {block('FAILSAFE', !!s?.failsafe_active, 'ACTIVE', 'CLEAR')}
+      {block('HW FAULT', !!s?.hw_error, 'LATCHED', 'CLEAR')}
+      {neutral('MOTOR ARM', !!s?.motor_armed, 'ARMED', 'DISARMED')}
       {block('CMD TIMEOUT', !!s?.cmd_timeout, 'TIMEOUT', 'FRESH')}
       {block('CRC ERROR', !!s?.crc_error_recent, 'RECENT', 'CLEAR')}
       <div style={{ marginTop: 'auto', fontSize: 8, color: C.textMuted, fontFamily: MONO, lineHeight: 1.4 }}>
@@ -288,6 +310,7 @@ const Header = ({ telemetry, conn, wsConnected, clock }) => {
   let overall;
   if (!wsConnected) overall = { label: 'SERVER OFFLINE', color: C.fail, bg: C.failBg };
   else if (!conn.base_link_up) overall = { label: 'BASE LINK LOST', color: C.fail, bg: C.failBg };
+  else if (s?.hw_error) overall = { label: 'HW FAULT', color: C.fail, bg: C.failBg };
   else if (s?.failsafe_active) overall = { label: 'FAILSAFE', color: C.fail, bg: C.failBg };
   else if (!conn.stm_status_fresh) overall = { label: 'TELEMETRY STALE', color: C.warn, bg: C.warnBg };
   else if (s && !s.elrs_link_up) overall = { label: 'RC LINK LOST', color: C.warn, bg: C.warnBg };
@@ -365,7 +388,7 @@ export default function BaseStation() {
 
       <footer style={{ padding: '5px 14px', borderTop: `1px solid ${C.border}`, background: C.bgCard, display: 'flex', justifyContent: 'space-between', fontFamily: MONO, fontSize: 9, color: C.textMuted, letterSpacing: '0.08em', flexShrink: 0, fontWeight: 600 }}>
         <span>BASE STATION · READ-ONLY OBSERVER {stale ? '· DATA STALE' : ''}</span>
-        <span>STM32 → UART → JETSON → QUIC/PROTOBUF → BASE → WS/WEBRTC</span>
+        <span>ESP32 → USB-TTL/UART → JETSON → QUIC/PROTOBUF → BASE → WS/WEBRTC</span>
       </footer>
     </div>
   );

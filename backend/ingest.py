@@ -31,8 +31,17 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+_MODE_NAMES = {
+    pb.ACTIVE_MODE_DRIVE: "DRIVE",
+    pb.ACTIVE_MODE_LASER: "LASER",
+    pb.ACTIVE_MODE_AUTONOMOUS: "AUTO",
+}
+# Reverse map for the DB column; 0 stays "unknown".
+_MODE_CODES = {"DRIVE": 1, "LASER": 2, "AUTO": 3}
+
+
 def _mode_name(v: int) -> str:
-    return {pb.ACTIVE_MODE_DRIVE: "DRIVE", pb.ACTIVE_MODE_LASER: "LASER"}.get(v, "UNKNOWN")
+    return _MODE_NAMES.get(v, "UNKNOWN")
 
 
 def _event_name(v: int) -> str:
@@ -60,6 +69,8 @@ def frame_to_dict(fr: pb.TelemetryFrame) -> Dict[str, Any]:
             "failsafe_active": s.failsafe_active,
             "crc_error_recent": s.crc_error_recent,
             "raw_durum": s.raw_durum,
+            "motor_armed": s.motor_armed,
+            "hw_error": s.hw_error,
         },
         "link": {
             "packets_lost_total": l.packets_lost_total,
@@ -80,10 +91,11 @@ def _frame_db_row(d: Dict[str, Any]) -> Dict[str, Any]:
         "ts_ms": d["ts"], "seq": d["seq"],
         "left_motor": c["left_motor"], "right_motor": c["right_motor"],
         "pan": c["pan_deg"], "tilt": c["tilt_deg"],
-        "laser": c["laser_on"], "mode": {"DRIVE": 1, "LASER": 2}.get(c["mode"], 0),
+        "laser": c["laser_on"], "mode": _MODE_CODES.get(c["mode"], 0),
         "elrs_link": s["elrs_link_up"], "jetson_link": s["jetson_link_up"],
         "cmd_timeout": s["cmd_timeout"], "auto_active": s["autonomous_active"],
         "failsafe": s["failsafe_active"], "crc_err": s["crc_error_recent"],
+        "motor_armed": s["motor_armed"], "hw_error": s["hw_error"],
         "packets_lost": l["packets_lost_total"], "status_rate_hz": l["status_rate_hz"],
         "stm_uptime_ms": l["stm_uptime_ms"], "stm_status_fresh": l["stm_status_fresh"],
     }

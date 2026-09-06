@@ -16,11 +16,21 @@ source:
   type: serial
 
   # --- serial source (real hardware) ---
-  # F407 native USB-CDC (Virtual COM Port), PA11/PA12. Jetson'da /dev/ttyACM* olur;
-  # ttyACM numarasi replug'da kayar -> cihaza-ozel by-id yolu kullan (sabit kalir).
-  # (Eski UART yolu: /dev/ttyTHS1 @115200; firmware artik USB-CDC gonderiyor.)
-  serial_port: /dev/serial/by-id/usb-STMicroelectronics_STM32_Virtual_ComPort_367D34503235-if00
-  serial_baud: 115200          # USB-CDC baud'u yok sayar; pyserial icin deger sart
+  # ESP32 (ika_esp32) kontrolcu, Jetson linki 3.3V USB-TTL uzerinden:
+  #   USB-TTL TX -> ESP32 GPIO21 (RX),  USB-TTL RX <- ESP32 GPIO22 (TX),  GND ortak.
+  # Jetson'da bu bir USB seri cihazidir: /dev/ttyUSB0 (numarasi replug'da kayar,
+  # sabitlemek icin by-id yolunu kullanin, ornek:
+  #   /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A50285BI-if00-port0).
+  # ESP32'nin KENDI USB portu ayri bir cihazdir ve sadece flash/debug icindir;
+  # protokol oradan AKMAZ.
+  # (Eski yollar: STM32F407 native USB-CDC; 40-pin UART /dev/ttyTHS1.)
+  serial_port: /dev/ttyUSB0
+  serial_baud: 115200          # controller.cpp JETSON_BAUD ile ayni olmali
+
+  # !!! PORT SAHIPLIGI: bu portu ayni anda ikinci bir process acamaz. Otonom
+  # koprusu (Jetson->ESP32 COMMAND yazan process) de ayni hatta oturur. Ikisi
+  # birden calisacaksa gateway'i `type: udp` yapin ve koprunun okudugu ham
+  # cerceveleri 127.0.0.1:9000'e re-publish ettirin (IPC tap).
 
   # --- udp source (sim / IPC tap) ---
   udp_host: 127.0.0.1
@@ -43,7 +53,9 @@ video:
   # Gateway, kameralari MOD-FARKINDA yonetir (ffmpeg -> MediaMTX RTSP push):
   #   DRIVE modu  -> front + rear yayinda, turret kapali
   #   LASER modu  -> turret yayinda, front + rear kapali
-  # Mod, STM aktifMod telemetrisinden (kumandada CH5) gelir; gecis otomatiktir.
+  #   AUTO  modu  -> turret + front (nisan gorusu + gidis yonu), rear kapali
+  # Mod, kontrolcunun aktifMod telemetrisinden gelir: CH5 DRIVE/LASER secer,
+  # CH8 ikisini de ezip AUTO yapar. Gecis otomatiktir.
   # Ayni anda en fazla 2 kamera acik kalir: hem Wi-Fi bandini hem de USB
   # isochronous butcesini (3 es-zamanli -> VIDIOC_STREAMON ENOSPC) korur.
   enabled: true
@@ -65,7 +77,7 @@ video:
       height: 480
       fps: 30
       bitrate_kbps: 1000
-      mode: laser
+      modes: [laser, auto]
     # ON: C270, USB port 2.2
     - name: front
       device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.2:1.0-video-index0
@@ -74,7 +86,7 @@ video:
       height: 480
       fps: 30
       bitrate_kbps: 1000
-      mode: drive
+      modes: [drive, auto]
     # ARKA: C270, USB port 2.4
     - name: rear
       device: /dev/v4l/by-path/platform-3610000.usb-usb-0:2.4:1.0-video-index0
@@ -83,4 +95,4 @@ video:
       height: 480
       fps: 30
       bitrate_kbps: 1000
-      mode: drive
+      modes: [drive]

@@ -36,8 +36,25 @@ rtmp: no
 hls: no
 srt: no
 
+# --- Recording (files land on the JETSON, where MediaMTX runs) -------------
+# Records the ALREADY-ENCODED x264 stream straight to disk: no extra encode,
+# no extra USB/Wi-Fi cost. Recording follows the mode-aware streaming for free
+# — MediaMTX only records while a camera is actually publishing, so a mode
+# switch just ends one segment and starts the next when that camera resumes.
+#
+# recordPath placeholders: %path = cam name, then time fields. Adjust the base
+# directory to a real, writable path on the Jetson (see notes below the file).
+pathDefaults:
+  record: yes
+  recordPath: /opt/ugv-recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordFormat: fmp4            # standard MP4 fragments; plays in VLC/browser
+  recordSegmentDuration: 10m    # one file per 10 min (easy to copy/scrub)
+  recordPartDuration: 1s
+  recordDeleteAfter: 24h        # auto-purge older than 24h; 0 = keep forever
+
 # --- The three vehicle cameras ---------------------------------------------
 # Publishers may connect at any time; consumers get the stream when present.
+# Recording settings are inherited from pathDefaults above.
 paths:
   cam_front:
   cam_rear:

@@ -4,11 +4,15 @@
 //  READ-ONLY monitoring. This schema intentionally contains NO command / control
 //  message. The Base Station observes the vehicle; it never actuates it.
 //
-//  Every field below is traceable to the FROZEN STM32<->Jetson protocol defined
-//  in needtocheck/ (haberlesme.h / haberlesme.cpp / jetson_parser.py). No value
-//  is invented. Source is noted in each comment as:  <- STATUS.<field>  etc.
+//  Every field below is traceable to the vehicle protocol defined in
+//  needtocheck/jetson_parser.py (framing, CRC, payload layout -- unchanged) plus
+//  the two extra STATUS.durum bits the ESP32 controller adds (ST_ARMED 0x20,
+//  ST_HW_ERROR 0x40). No value is invented. Source is noted in each comment as:
+//  <- STATUS.<field>  etc.
 //
-//  Physical source (do NOT redesign): STM32 USART3 <-> Jetson @115200 8N1,
+//  Physical source (do NOT redesign): the vehicle controller is an ESP32-WROOM-32
+//  (ika_esp32). Its Jetson link is UART on GPIO21 (RX) / GPIO22 (TX) via a 3.3 V
+//  USB-TTL adapter -> /dev/ttyUSB* on the Jetson, 115200 8N1.
 //  frame  AA 55 | VER | TYPE | LEN | SEQ | PAYLOAD | CRC16-CCITT(LE).
 //  STATUS @20Hz, HEARTBEAT @10Hz.
 // ============================================================================
@@ -23,11 +27,17 @@ option go_package = "github.com/ugv/basestation/gen/telemetry/v1;telemetryv1";
 // proto3 requires a 0 = UNSPECIFIED entry; the gateway maps the raw firmware
 // integers explicitly, so the wire enum can follow proto convention safely.
 
-// STATUS.aktifMod : 0 = surus (drive), 1 = lazer.  (tank_main.ino MOD_SURUS/MOD_LAZER)
+// STATUS.aktifMod, as emitted by the ESP32 controller (VehicleMode in
+// controller.cpp): 0 = MODE_MANUAL_DRIVE, 1 = MODE_MANUAL_TURRET (servo+laser),
+// 2 = MODE_AUTONOMOUS. Mode 2 is selected by CH8 on the transmitter and
+// OVERRIDES CH5; while it is active the vehicle follows the Jetson's COMMAND
+// (drive + turret + laser all at once), so it is a distinct plane, not a
+// drive/laser variant.
 enum ActiveMode {
   ACTIVE_MODE_UNSPECIFIED = 0;
-  ACTIVE_MODE_DRIVE = 1;   // <- aktifMod == 0
-  ACTIVE_MODE_LASER = 2;   // <- aktifMod == 1
+  ACTIVE_MODE_DRIVE = 1;        // <- aktifMod == 0  (manual drive)
+  ACTIVE_MODE_LASER = 2;        // <- aktifMod == 1  (manual turret + laser)
+  ACTIVE_MODE_AUTONOMOUS = 3;   // <- aktifMod == 2  (Jetson-commanded)
 }
 
 // HEARTBEAT payload byte 0 (kaynak). HB_KAYNAK_STM=0, HB_KAYNAK_JETSON=1.
@@ -42,7 +52,7 @@ enum HeartbeatSource {
 enum EventType {
   EVENT_TYPE_UNSPECIFIED = 0;
 
-  EVENT_MODE_CHANGED = 1;              // aktifMod changed (DRIVE<->LASER)
+  EVENT_MODE_CHANGED = 1;              // aktifMod changed (DRIVE/LASER/AUTO)
 
   EVENT_AUTONOMOUS_ENGAGED = 2;        // durum.AUTO_EN 0 -> 1
   EVENT_AUTONOMOUS_DISENGAGED = 3;     // durum.AUTO_EN 1 -> 0
@@ -76,6 +86,12 @@ enum EventType {
   // recovered (no envelopes / gateway heartbeat). Never sent by the gateway.
   EVENT_BASE_LINK_LOST = 17;
   EVENT_BASE_LINK_RESTORED = 18;
+
+  // ESP32-only durum bits (0x20 / 0x40).
+  EVENT_MOTOR_ARMED = 19;              // durum.ARMED 0 -> 1
+  EVENT_MOTOR_DISARMED = 20;           // durum.ARMED 1 -> 0
+  EVENT_HW_ERROR_SET = 21;             // durum.HW_ERROR 0 -> 1 (latched fault)
+  EVENT_HW_ERROR_CLEARED = 22;         // durum.HW_ERROR 1 -> 0
 }
 
 // ---- High-frequency actuator / control state -------------------------------
@@ -92,7 +108,7 @@ message VehicleControlState {
 
 // ---- Vehicle status flags --------------------------------------------------
 // All bits come from the single STATUS.durum byte + STATUS.elrsLink. raw_durum
-// is preserved verbatim for forward compatibility (reserved bits 5..7).
+// is preserved verbatim for forward compatibility (bit 7 still reserved).
 message SystemStatus {
   bool elrs_link_up       = 1;  // <- STATUS.elrsLink (RC link, STM's report)
   bool jetson_link_up     = 2;  // <- STATUS.durum & ST_JETSON_LINK (STM's view)
@@ -101,6 +117,14 @@ message SystemStatus {
   bool failsafe_active    = 5;  // <- STATUS.durum & ST_FAILSAFE
   bool crc_error_recent   = 6;  // <- STATUS.durum & ST_CRC_ERR
   uint32 raw_durum        = 7;  // <- STATUS.durum (verbatim)
+
+  // ESP32 controller additions to the durum byte. The firmware refuses to drive
+  // the motors until its arming interlock is satisfied (boot delay + sticks
+  // centred; reset on every mode change / RC dropout), and latches a hardware
+  // fault on RMT/LEDC setup or TX failure. hw_error also forces failsafe_active,
+  // so these two bits are what distinguishes "RC lost" from "controller faulted".
+  bool motor_armed        = 8;  // <- STATUS.durum & ST_ARMED    (0x20)
+  bool hw_error           = 9;  // <- STATUS.durum & ST_HW_ERROR (0x40)
 }
 
 // ---- Link / transport health (gateway-derived, deterministic) --------------

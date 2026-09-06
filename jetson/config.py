@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import yaml
 
@@ -13,7 +13,7 @@ DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 @dataclass
 class SourceConfig:
     type: str = "udp"                 # "serial" | "udp"
-    serial_port: str = "/dev/ttyTHS1"
+    serial_port: str = "/dev/ttyUSB0"
     serial_baud: int = 115200
     udp_host: str = "127.0.0.1"
     udp_port: int = 9000
@@ -45,7 +45,11 @@ class CameraConfig:
     height: int = 480
     fps: int = 30
     bitrate_kbps: int = 1000
-    mode: str = "drive"               # bu kamera hangi arac modunda yayinlanir: "drive" | "laser"
+    # Bu kamera hangi arac mod(lar)inda yayinlanir: "drive" | "laser" | "auto".
+    # `modes` verilirse o gecerlidir; verilmezse tek degerli `mode` kullanilir
+    # (eski config'lerle geriye donuk uyum).
+    mode: str = "drive"
+    modes: Optional[List[str]] = None
     rtp_port: int = 5000
 
 

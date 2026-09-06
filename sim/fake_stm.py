@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-Fake STM32 — emits valid STATUS + HEARTBEAT frames so the whole Base Station
-pipeline can be exercised WITHOUT the vehicle.
+Fake vehicle controller — emits valid STATUS + HEARTBEAT frames so the whole
+Base Station pipeline can be exercised WITHOUT the vehicle.
 
-It builds frames exactly like the firmware (haberlesme.cpp `frameGonder` /
-`telemetriGonder` / `heartbeatGonder`), reusing the FROZEN protocol's CRC and
-constants imported from needtocheck/jetson_parser.py (never modified). Frames
-are sent over UDP to the gateway's `udp` source (default 127.0.0.1:9000).
+It builds frames exactly like the ESP32 firmware (ika_esp32 controller.cpp
+`Proto_SendFrame` / `Proto_SendStatus` / `Proto_SendHeartbeat`), reusing the
+FROZEN protocol's CRC and constants imported from needtocheck/jetson_parser.py
+(never modified). Frames are sent over UDP to the gateway's `udp` source
+(default 127.0.0.1:9000).
 
     python sim/fake_stm.py                 # default dynamic scenario, 20/10 Hz
     python sim/fake_stm.py --host 127.0.0.1 --port 9000
 
 Scenario timeline (loops ~30 s) deterministically triggers each event type:
-    mode changes, autonomy engage/disengage, laser on/off, failsafe pulse,
-    ELRS link drop (field), STM<->Jetson link drop (durum), CRC blips.
+    mode changes (DRIVE/LASER/AUTO), autonomy engage/disengage, laser on/off,
+    failsafe pulse, ELRS link drop (field), Jetson link drop (durum), CRC blips,
+    motor arm/disarm, and a latched hardware-fault pulse.
 Stop it (Ctrl-C) to test "STM telemetry stale"; stop the gateway to test
 "base link lost".
 """
@@ -40,7 +42,17 @@ ST_JETSON_LINK, ST_CMD_TIMEOUT = _p.ST_JETSON_LINK, _p.ST_CMD_TIMEOUT
 ST_AUTO_EN, ST_FAILSAFE, ST_CRC_ERR = _p.ST_AUTO_EN, _p.ST_FAILSAFE, _p.ST_CRC_ERR
 crc16 = _p.crc16_ccitt
 
-MAX_GUC = 50  # firmware caps applied motor output at 50 %
+# Two durum bits the ESP32 firmware adds that the frozen parser predates; the
+# gateway decodes them straight from the raw byte (jetson/mapper.py).
+ST_ARMED = 0x20
+ST_HW_ERROR = 0x40
+
+# aktifMod values (controller.cpp VehicleMode).
+MODE_DRIVE, MODE_LASER, MODE_AUTO = 0, 1, 2
+
+# The ESP32 caps manual drive with CH6 (30 / 60 / 100 %); the sim holds the
+# low gear, which is what the first field tests run at.
+MAX_GUC = 30
 
 
 class FrameBuilder:
@@ -68,25 +80,39 @@ def scenario(t: float) -> dict:
     """Return the STM's reported state at elapsed time t (seconds)."""
     phase = t % 30.0
 
-    mode = 1 if 8.0 <= phase < 16.0 else 0            # DRIVE / LASER window
-    auto = 4.0 <= phase < 6.0                         # autonomy engaged window
+    if 8.0 <= phase < 16.0:
+        mode = MODE_LASER                             # CH5 down: turret + laser
+    elif 3.0 <= phase < 7.0:
+        mode = MODE_AUTO                              # CH8 down: Jetson drives
+    else:
+        mode = MODE_DRIVE                             # manual drive
+
+    auto = mode == MODE_AUTO and 4.0 <= phase < 6.0   # AUTO_REQ accepted window
     failsafe = 20.0 <= phase < 22.0                   # failsafe pulse
+    hw_fault = 28.0 <= phase < 29.0                   # latched controller fault
     elrs = not (25.0 <= phase < 27.0)                 # ELRS (RC) link drop (field)
-    jlink = not (12.0 <= phase < 13.0)                # STM's view of Jetson link drop
+    jlink = not (12.0 <= phase < 13.0)                # controller's view of Jetson link
     crc_blip = (int(phase) % 10 == 9) and (t * 5 % 1 < 0.2)  # occasional CRC blip
+
+    # The firmware disarms the motors on every mode change and while RC is gone;
+    # in turret mode ARM:0 is the normal, correct reading.
+    armed = (mode in (MODE_DRIVE, MODE_AUTO)) and elrs and not failsafe and not hw_fault
 
     pan = int(90 + 40 * math.sin(t * 0.6))
     tilt = int(90 + 20 * math.sin(t * 0.4))
 
-    if mode == 0 and not failsafe:                    # DRIVE
+    if mode == MODE_DRIVE and armed:
         base = int(80 * math.sin(t * 0.8))
         turn = int(30 * math.sin(t * 1.3))
         sol = max(-100, min(100, base + turn)) * MAX_GUC // 100
         sag = max(-100, min(100, base - turn)) * MAX_GUC // 100
-    else:                                             # LASER or failsafe -> motors 0
+    elif mode == MODE_AUTO and auto:
+        # Autonomy has no CH6 ceiling on the vehicle; the sim stays gentle.
+        sol = sag = int(25 * math.sin(t * 0.5))
+    else:                                             # turret / failsafe -> motors 0
         sol = sag = 0
 
-    lazer = 1 if (mode == 1 and math.sin(t * 2.0) > 0 and not failsafe) else 0
+    lazer = 1 if (mode == MODE_LASER and math.sin(t * 2.0) > 0 and not failsafe) else 0
 
     durum = ST_JETSON_LINK if jlink else 0
     if auto and not failsafe:
@@ -95,13 +121,18 @@ def scenario(t: float) -> dict:
         durum |= ST_FAILSAFE
     if crc_blip:
         durum |= ST_CRC_ERR
+    if armed:
+        durum |= ST_ARMED
+    if hw_fault:
+        # The firmware raises FAILSAFE together with the fault latch.
+        durum |= ST_HW_ERROR | ST_FAILSAFE
 
     return dict(sol=sol, sag=sag, pan=pan, tilt=tilt,
                 lazer=lazer, mod=mode, elrs=1 if elrs else 0, durum=durum)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Fake STM32 telemetry emitter (UDP)")
+    ap = argparse.ArgumentParser(description="Fake vehicle telemetry emitter (UDP)")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--status-hz", type=float, default=20.0)
