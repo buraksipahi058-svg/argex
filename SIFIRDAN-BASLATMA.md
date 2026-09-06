@@ -172,52 +172,31 @@ v4l2-ctl --list-devices
 ```
 (C922 + iki C270 görünmeli. Görünmüyorsa kamera takılı değil / USB sorunudur.)
 
-### 4.4 Kamera başlatma script'i (bir kez oluştur)
-Kameraları sabit kimlikle bulup MediaMTX + 3 yayını başlatan yardımcı:
+### 4.4 Kamera başlatma script'i (repodan gelir)
+Kameraları tek komutla başlatan script repoda hazır: `scripts/start_video.sh`.
+Kod güncelse (Bölüm 3'te `git pull` yaptıysan) zaten var. Çalıştırılabilir yap
+(bir kez):
 ```bash
-cat > /root/start_video.sh <<'EOF'
-#!/usr/bin/env bash
-# Kameralar SABIT kimlikle bulunur; video-numarasi kaysa da calisir.
-#   turret = C922 (benzersiz seri -> by-id)
-#   front  = USB fiziksel port 2.2 (by-path)
-#   rear   = USB fiziksel port 2.1 (by-path)
-# Fiziksel on/arka ters ise asagidaki 2.2 / 2.1'i degistir.
-TURRET=$(ls /dev/v4l/by-id/usb-046d_C922_*-video-index0 2>/dev/null | head -1)
-FRONT=$(ls /dev/v4l/by-path/*:2.2:1.0-video-index0 2>/dev/null | head -1)
-REAR=$(ls /dev/v4l/by-path/*:2.1:1.0-video-index0 2>/dev/null | head -1)
-
-pkill -f '/root/mediamtx' 2>/dev/null
-pkill -f 'ffmpeg.*rtsp://127.0.0.1:8554' 2>/dev/null
-sleep 1
-
-/root/mediamtx /root/mm.yml >/tmp/mediamtx.log 2>&1 &
-sleep 2
-
-push() {
-  local dev="$1" name="$2"
-  if [ -z "$dev" ]; then echo "!! $name: kamera BULUNAMADI (takili mi? dogru portta mi?)"; return; fi
-  echo ">> $name <- $dev"
-  ffmpeg -hide_banner -nostdin -loglevel warning \
-    -f v4l2 -input_format mjpeg -framerate 30 -video_size 640x480 -i "$dev" \
-    -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p \
-    -b:v 1000k -maxrate 1000k -bufsize 500k -g 30 \
-    -f rtsp -rtsp_transport tcp "rtsp://127.0.0.1:8554/$name" >/tmp/$name.log 2>&1 &
-}
-push "$TURRET" cam_turret
-push "$FRONT"  cam_front
-push "$REAR"   cam_rear
-sleep 3
-echo "--- durum (log bos = iyi) ---"
-for c in cam_turret cam_front cam_rear; do echo "== $c =="; tail -2 /tmp/$c.log 2>/dev/null; done
-EOF
-chmod +x /root/start_video.sh
+chmod +x /root/argex/scripts/start_video.sh
 ```
+Script kameraları **sabit kimlikle** bulur (v4l2-ctl ile): turret = C922 ismi,
+ön = USB portu 2.2, arka = USB portu 2.1. Fiziksel ön/arka ters ise script'in
+başındaki `FRONT_PORT` / `REAR_PORT` değerlerini değiştir.
 
 ### 4.5 Kameraları başlat (her açılışta)
 ```bash
-/root/start_video.sh
+/root/argex/scripts/start_video.sh
 ```
+Bu: eski MediaMTX/ffmpeg'i durdurur → MediaMTX'i başlatır → 3 kamerayı push eder.
 Her kamera için log **boşsa** = iyi. Hata görürsen Bölüm 7'ye bak.
+
+Eski kayıtları da silip temiz başlamak istersen (⚠️ silme geri alınamaz):
+```bash
+/root/argex/scripts/start_video.sh --temizle
+```
+(Onay sorar; `--temizle -y` onaysız siler. Yarış kaydını korumak için silme
+varsayılan **değil**.)
+
 Kaydetmek (yarış sonu teslim) istersen → **Bölüm 9**.
 
 ---
