@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useTelemetry } from './hooks/useTelemetry';
 import { useWhepStream } from './hooks/useWhepStream';
 import { CAMERAS } from './config';
@@ -277,21 +277,93 @@ const EventsPanel = ({ events }) => {
   );
 };
 
+// Aracın gideceği koridoru gösteren yeşil kılavuz (geri görüş kamerası gibi).
+// Köşeler 0–1 oran; viewBox 0..100'e ölçeklenir, çizgi kalınlığı non-scaling
+// olduğu için ekranda sabit piksel kalır.
+const GuideOverlay = ({ g, editable, onHandleDown }) => {
+  const P = ([x, y]) => `${x * 100},${y * 100}`;
+  const edgeX = (near, far, y) => {
+    const denom = far[1] - near[1] || 1;
+    const t = (y - near[1]) / denom;                 // near→far interpolasyon
+    return near[0] + t * (far[0] - near[0]);
+  };
+  const line = (p1, p2, key) => (
+    <polyline key={key} points={`${P(p1)} ${P(p2)}`} fill="none"
+      stroke={g.color} strokeOpacity={g.opacity} strokeWidth={g.lineWidth}
+      strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+  );
+  return (
+    <svg viewBox="0 0 100 100" preserveAspectRatio="none"
+      style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: editable ? 'auto' : 'none' }}>
+      {line(g.nearLeft, g.farLeft, 'L')}
+      {line(g.nearRight, g.farRight, 'R')}
+      {(g.bands || []).map((y, i) => (
+        <line key={`b${i}`}
+          x1={edgeX(g.nearLeft, g.farLeft, y) * 100} y1={y * 100}
+          x2={edgeX(g.nearRight, g.farRight, y) * 100} y2={y * 100}
+          stroke={g.color} strokeOpacity={g.opacity} strokeWidth={g.lineWidth}
+          strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+      ))}
+      {editable && ['nearLeft', 'nearRight', 'farLeft', 'farRight'].map((k) => (
+        <circle key={k} cx={g[k][0] * 100} cy={g[k][1] * 100} r="2"
+          fill="#ffffff" stroke={g.color} strokeWidth="1" vectorEffect="non-scaling-stroke"
+          style={{ cursor: 'grab' }} onPointerDown={(e) => onHandleDown(k, e)} />
+      ))}
+    </svg>
+  );
+};
+
 const CameraTile = ({ cam }) => {
   const { videoRef, state } = useWhepStream(cam.path);
   const badge = state === 'live' ? C.ok : state === 'connecting' ? C.warn : C.fail;
+  const boxRef = useRef(null);
+  const dragRef = useRef(null);
+  const hasGuides = !!cam.guides?.enabled;
+  const [edit, setEdit] = useState(false);
+  const [g, setG] = useState(cam.guides);
+
+  const r2 = (v) => Math.round(v * 100) / 100;
+  const onMove = (e) => {
+    if (!dragRef.current || !boxRef.current) return;
+    const b = boxRef.current.getBoundingClientRect();
+    const x = Math.min(1, Math.max(0, (e.clientX - b.left) / b.width));
+    const y = Math.min(1, Math.max(0, (e.clientY - b.top) / b.height));
+    setG((prev) => ({ ...prev, [dragRef.current]: [r2(x), r2(y)] }));
+  };
+  const endDrag = () => { dragRef.current = null; };
+
   return (
-    <div style={{ position: 'relative', flex: 1, minWidth: 0, background: 'repeating-linear-gradient(45deg,#1e293b 0,#1e293b 12px,#0f172a 12px,#0f172a 24px)', border: `1px solid ${C.borderStrong}`, borderRadius: 3, overflow: 'hidden' }}>
+    <div ref={boxRef}
+      onPointerMove={edit ? onMove : undefined}
+      onPointerUp={edit ? endDrag : undefined}
+      onPointerLeave={edit ? endDrag : undefined}
+      style={{ position: 'relative', flex: 1, minWidth: 0, background: 'repeating-linear-gradient(45deg,#1e293b 0,#1e293b 12px,#0f172a 12px,#0f172a 24px)', border: `1px solid ${C.borderStrong}`, borderRadius: 3, overflow: 'hidden' }}>
       <video ref={videoRef} autoPlay muted playsInline style={{ width: '100%', height: '100%', objectFit: 'cover', display: state === 'live' ? 'block' : 'none' }} />
       {state !== 'live' && (
         <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontFamily: MONO, fontSize: 9, letterSpacing: '0.15em', fontWeight: 700, textAlign: 'center', padding: 6 }}>
           {state === 'connecting' ? 'CONNECTING…' : 'NO SIGNAL'}
         </div>
       )}
+      {hasGuides && (state === 'live' || edit) && (
+        <GuideOverlay g={g} editable={edit} onHandleDown={(k, e) => { dragRef.current = k; e.preventDefault(); }} />
+      )}
       <div style={{ position: 'absolute', top: 5, left: 6, display: 'flex', alignItems: 'center', gap: 5, fontFamily: MONO, fontSize: 9, color: '#e2e8f0', fontWeight: 700, letterSpacing: '0.08em' }}>
         <Dot color={badge} pulse={state === 'connecting'} size={6} />
         {cam.label}
       </div>
+      {hasGuides && (
+        <button onClick={() => setEdit((v) => !v)}
+          style={{ position: 'absolute', top: 4, right: 5, fontSize: 8, fontFamily: MONO, fontWeight: 700, letterSpacing: '0.08em', color: edit ? '#0f172a' : '#e2e8f0', background: edit ? g.color : 'rgba(0,0,0,0.5)', border: `1px solid ${g.color}`, borderRadius: 3, padding: '2px 5px', cursor: 'pointer' }}>
+          {edit ? 'BİTİR' : 'KALİBRE'}
+        </button>
+      )}
+      {hasGuides && edit && (
+        <div style={{ position: 'absolute', bottom: 4, left: 6, right: 6, fontSize: 8, fontFamily: MONO, color: '#e2e8f0', background: 'rgba(0,0,0,0.7)', padding: 4, borderRadius: 3, lineHeight: 1.5, userSelect: 'text' }}>
+          <div>nearLeft: [{g.nearLeft.join(', ')}], nearRight: [{g.nearRight.join(', ')}],</div>
+          <div>farLeft: [{g.farLeft.join(', ')}], farRight: [{g.farRight.join(', ')}],</div>
+          <div style={{ color: '#94a3b8' }}>↑ bu değerleri src/config.js → guides içine yapıştır</div>
+        </div>
+      )}
     </div>
   );
 };
