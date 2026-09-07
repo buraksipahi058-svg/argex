@@ -304,8 +304,10 @@ const GuideOverlay = ({ g, editable, onHandleDown }) => {
           stroke={g.color} strokeOpacity={g.opacity} strokeWidth={g.lineWidth}
           strokeLinecap="round" vectorEffect="non-scaling-stroke" />
       ))}
-      {g.crosshair && (() => {
-        const [cx, cy] = [g.crosshair[0] * 100, g.crosshair[1] * 100];
+      {g.crossK != null && (() => {
+        const cxF = g.crossX ?? 0.5;
+        const cyF = Math.min(1, Math.max(0, 0.5 - g.crossK / (g.dist || 3)));  // paralaks
+        const cx = cxF * 100, cy = cyF * 100;
         const half = (g.crossSize || 0.1) * 100 / 2;
         const gap = half * 0.35;
         const st = { stroke: g.color, strokeOpacity: g.opacity, strokeWidth: g.lineWidth, strokeLinecap: 'round', vectorEffect: 'non-scaling-stroke' };
@@ -316,14 +318,13 @@ const GuideOverlay = ({ g, editable, onHandleDown }) => {
             <line x1={cx - half} y1={cy} x2={cx - gap} y2={cy} {...st} />
             <line x1={cx + half} y1={cy} x2={cx + gap} y2={cy} {...st} />
             <circle cx={cx} cy={cy} r="0.8" fill="none" {...st} />
+            {editable && (
+              <circle cx={cx} cy={cy} r="2.4" fill={g.color} fillOpacity="0.35" stroke="#ffffff" strokeWidth="1"
+                vectorEffect="non-scaling-stroke" style={{ cursor: 'grab' }} onPointerDown={(e) => onHandleDown('crosshair', e)} />
+            )}
           </g>
         );
       })()}
-      {editable && g.crosshair && (
-        <circle cx={g.crosshair[0] * 100} cy={g.crosshair[1] * 100} r="2.4"
-          fill={g.color} fillOpacity="0.35" stroke="#ffffff" strokeWidth="1" vectorEffect="non-scaling-stroke"
-          style={{ cursor: 'grab' }} onPointerDown={(e) => onHandleDown('crosshair', e)} />
-      )}
       {editable && ['nearLeft', 'nearRight', 'farLeft', 'farRight'].map((k) => (
         <circle key={k} cx={g[k][0] * 100} cy={g[k][1] * 100} r="2"
           fill="#ffffff" stroke={g.color} strokeWidth="1" vectorEffect="non-scaling-stroke"
@@ -364,7 +365,12 @@ const CameraTile = ({ cam }) => {
     const b = boxRef.current.getBoundingClientRect();
     const x = Math.min(1, Math.max(0, (e.clientX - b.left) / b.width));
     const y = Math.min(1, Math.max(0, (e.clientY - b.top) / b.height));
-    setG((prev) => ({ ...prev, [dragRef.current]: [r2(x), r2(y)] }));
+    if (dragRef.current === 'crosshair') {
+      // Yatay: crossX. Dikey: bu mesafede kalibre → crossK = (0.5 - y) * mesafe.
+      setG((prev) => ({ ...prev, crossX: r2(x), crossK: r2((0.5 - y) * (prev.dist || 3)) }));
+    } else {
+      setG((prev) => ({ ...prev, [dragRef.current]: [r2(x), r2(y)] }));
+    }
   };
   const endDrag = () => { dragRef.current = null; };
 
@@ -409,6 +415,17 @@ const CameraTile = ({ cam }) => {
             <button style={stepBtn} onClick={() => setWidth(1)}>+</button>
             <button onClick={resetGuides} title="başlangıca dön"
               style={{ marginLeft: 'auto', fontFamily: MONO, fontSize: 8, fontWeight: 700, color: '#e2e8f0', background: 'rgba(255,255,255,0.12)', border: '1px solid #475569', borderRadius: 2, padding: '2px 5px', cursor: 'pointer' }}>Sıfırla</button>
+            {g.crossK != null && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, width: '100%' }}>
+                <span>mesafe</span>
+                <input type="range" min="1" max="10" step="0.5" value={g.dist || 3}
+                  onChange={(e) => setG((p) => ({ ...p, dist: +e.target.value }))} style={{ flex: 1, minWidth: 60 }} />
+                <span style={{ minWidth: 26, textAlign: 'right' }}>{(g.dist || 3)}m</span>
+                <button style={stepBtn} onClick={() => setG((p) => ({ ...p, crossSize: r2(clamp((p.crossSize || 0.1) - 0.02, 0.03, 0.4)) }))}>−</button>
+                <span title="artı boyutu">✚</span>
+                <button style={stepBtn} onClick={() => setG((p) => ({ ...p, crossSize: r2(clamp((p.crossSize || 0.1) + 0.02, 0.03, 0.4)) }))}>+</button>
+              </div>
+            )}
           </div>
         );
       })()}

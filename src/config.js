@@ -33,10 +33,15 @@ export const CAMERAS = [
       nearLeft:  [0.30, 1.00], nearRight: [0.70, 1.00],  // alt (yakın) kenarlar
       farLeft:   [0.43, 0.52], farRight:  [0.57, 0.52],  // üst (uzak) kenarlar
       bands:     [1.00, 0.78, 0.58],                     // mesafe çizgileri (y oranı)
-      // Nişan artısı (crosshair). Lazer kameradan 8.2 cm YUKARIDA olduğu için
-      // lazer noktası merkezin biraz ÜSTünde görünür → varsayılan y < 0.5.
-      // AYAR modunda artıyı sürükleyip lazerin gerçekten vurduğu yere oturt.
-      crosshair: [0.50, 0.42],
+      // Nişan artısı (crosshair). Lazer kameraya PARALEL ve 8.2 cm YUKARIDA →
+      // lazer noktası merkezin üstünde görünür ve KAYMASI MESAFEYLE değişir
+      // (yakında çok yukarı, uzakta merkeze yakın). Bu yüzden dikey yeri
+      // paralaks modeliyle mesafeden hesaplanır:  y = 0.5 - crossK / mesafe.
+      // AYAR panelindeki "mesafe" kaydırıcısı 1–10 m; artıyı bir kez o mesafedeki
+      // lazer noktasına sürükleyince crossK kalibre olur ve TÜM mesafeler oturur.
+      crossX: 0.50,         // yatay konum (paralel lazer → merkez)
+      crossK: 0.10,         // paralaks sabiti (kalibrasyonla ayarlanır)
+      dist: 3,              // AYAR'daki mesafe (m)
       crossSize: 0.10,      // artının boyutu (kutu oranı)
     },
   },
