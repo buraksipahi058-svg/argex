@@ -319,10 +319,26 @@ const CameraTile = ({ cam }) => {
   const boxRef = useRef(null);
   const dragRef = useRef(null);
   const hasGuides = !!cam.guides?.enabled;
+  const LS_KEY = `guide:${cam.key}`;
   const [edit, setEdit] = useState(false);
-  const [g, setG] = useState(cam.guides);
+  const [g, setG] = useState(() => {
+    if (!cam.guides) return cam.guides;
+    try {
+      const s = localStorage.getItem(LS_KEY);
+      return s ? { ...cam.guides, ...JSON.parse(s) } : cam.guides;
+    } catch { return cam.guides; }
+  });
+  // Ayarları tarayıcıda sakla (koda girmeden kalıcı olsun).
+  useEffect(() => {
+    if (!cam.guides) return;
+    try { localStorage.setItem(LS_KEY, JSON.stringify(g)); } catch { /* storage yok/kapalı */ }
+  }, [g, cam.guides, LS_KEY]);
 
   const r2 = (v) => Math.round(v * 100) / 100;
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const setOpacity = (d) => setG((p) => ({ ...p, opacity: r2(clamp(p.opacity + d, 0.1, 1)) }));
+  const setWidth = (d) => setG((p) => ({ ...p, lineWidth: clamp(p.lineWidth + d, 1, 8) }));
+  const resetGuides = () => { try { localStorage.removeItem(LS_KEY); } catch { /* ignore */ } setG(cam.guides); };
   const onMove = (e) => {
     if (!dragRef.current || !boxRef.current) return;
     const b = boxRef.current.getBoundingClientRect();
@@ -353,17 +369,29 @@ const CameraTile = ({ cam }) => {
       </div>
       {hasGuides && (
         <button onClick={() => setEdit((v) => !v)}
-          style={{ position: 'absolute', top: 4, right: 5, fontSize: 8, fontFamily: MONO, fontWeight: 700, letterSpacing: '0.08em', color: edit ? '#0f172a' : '#e2e8f0', background: edit ? g.color : 'rgba(0,0,0,0.5)', border: `1px solid ${g.color}`, borderRadius: 3, padding: '2px 5px', cursor: 'pointer' }}>
-          {edit ? 'BİTİR' : 'KALİBRE'}
+          style={{ position: 'absolute', top: 4, right: 5, fontSize: 8, fontFamily: MONO, fontWeight: 700, letterSpacing: '0.08em', color: edit ? '#0f172a' : '#e2e8f0', background: edit ? g.color : 'rgba(0,0,0,0.5)', border: `1px solid ${g.color}`, borderRadius: 3, padding: '2px 5px', cursor: 'pointer', zIndex: 2 }}>
+          {edit ? 'BİTİR' : 'AYAR'}
         </button>
       )}
-      {hasGuides && edit && (
-        <div style={{ position: 'absolute', bottom: 4, left: 6, right: 6, fontSize: 8, fontFamily: MONO, color: '#e2e8f0', background: 'rgba(0,0,0,0.7)', padding: 4, borderRadius: 3, lineHeight: 1.5, userSelect: 'text' }}>
-          <div>nearLeft: [{g.nearLeft.join(', ')}], nearRight: [{g.nearRight.join(', ')}],</div>
-          <div>farLeft: [{g.farLeft.join(', ')}], farRight: [{g.farRight.join(', ')}],</div>
-          <div style={{ color: '#94a3b8' }}>↑ bu değerleri src/config.js → guides içine yapıştır</div>
-        </div>
-      )}
+      {hasGuides && edit && (() => {
+        const stepBtn = { fontFamily: MONO, fontSize: 10, fontWeight: 700, lineHeight: 1, color: '#e2e8f0', background: 'rgba(255,255,255,0.12)', border: '1px solid #475569', borderRadius: 2, width: 15, height: 15, cursor: 'pointer', padding: 0 };
+        return (
+          <div style={{ position: 'absolute', top: 22, left: 4, right: 4, display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', fontSize: 8, fontFamily: MONO, color: '#e2e8f0', background: 'rgba(0,0,0,0.75)', padding: '3px 4px', borderRadius: 3, zIndex: 2 }}>
+            <input type="color" value={g.color} onChange={(e) => setG((p) => ({ ...p, color: e.target.value }))} title="renk"
+              style={{ width: 18, height: 15, border: 'none', background: 'none', padding: 0, cursor: 'pointer' }} />
+            <span>op</span>
+            <button style={stepBtn} onClick={() => setOpacity(-0.05)}>−</button>
+            <span style={{ minWidth: 20, textAlign: 'center' }}>{g.opacity.toFixed(2)}</span>
+            <button style={stepBtn} onClick={() => setOpacity(0.05)}>+</button>
+            <span>kal</span>
+            <button style={stepBtn} onClick={() => setWidth(-1)}>−</button>
+            <span style={{ minWidth: 8, textAlign: 'center' }}>{g.lineWidth}</span>
+            <button style={stepBtn} onClick={() => setWidth(1)}>+</button>
+            <button onClick={resetGuides} title="başlangıca dön"
+              style={{ marginLeft: 'auto', fontFamily: MONO, fontSize: 8, fontWeight: 700, color: '#e2e8f0', background: 'rgba(255,255,255,0.12)', border: '1px solid #475569', borderRadius: 2, padding: '2px 5px', cursor: 'pointer' }}>Sıfırla</button>
+          </div>
+        );
+      })()}
     </div>
   );
 };
