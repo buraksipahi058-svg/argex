@@ -304,6 +304,26 @@ const GuideOverlay = ({ g, editable, onHandleDown }) => {
           stroke={g.color} strokeOpacity={g.opacity} strokeWidth={g.lineWidth}
           strokeLinecap="round" vectorEffect="non-scaling-stroke" />
       ))}
+      {g.crosshair && (() => {
+        const [cx, cy] = [g.crosshair[0] * 100, g.crosshair[1] * 100];
+        const half = (g.crossSize || 0.1) * 100 / 2;
+        const gap = half * 0.35;
+        const st = { stroke: g.color, strokeOpacity: g.opacity, strokeWidth: g.lineWidth, strokeLinecap: 'round', vectorEffect: 'non-scaling-stroke' };
+        return (
+          <g>
+            <line x1={cx} y1={cy - half} x2={cx} y2={cy - gap} {...st} />
+            <line x1={cx} y1={cy + gap} x2={cx} y2={cy + half} {...st} />
+            <line x1={cx - half} y1={cy} x2={cx - gap} y2={cy} {...st} />
+            <line x1={cx + half} y1={cy} x2={cx + gap} y2={cy} {...st} />
+            <circle cx={cx} cy={cy} r="0.8" fill="none" {...st} />
+          </g>
+        );
+      })()}
+      {editable && g.crosshair && (
+        <circle cx={g.crosshair[0] * 100} cy={g.crosshair[1] * 100} r="2.4"
+          fill={g.color} fillOpacity="0.35" stroke="#ffffff" strokeWidth="1" vectorEffect="non-scaling-stroke"
+          style={{ cursor: 'grab' }} onPointerDown={(e) => onHandleDown('crosshair', e)} />
+      )}
       {editable && ['nearLeft', 'nearRight', 'farLeft', 'farRight'].map((k) => (
         <circle key={k} cx={g[k][0] * 100} cy={g[k][1] * 100} r="2"
           fill="#ffffff" stroke={g.color} strokeWidth="1" vectorEffect="non-scaling-stroke"
