@@ -82,6 +82,7 @@ class TelemetryMapper:
         self._prev_status: Optional[Dict] = None
         self._latest_control = pb.VehicleControlState()
         self._latest_status = pb.SystemStatus()
+        self._latest_imu = pb.ImuState()   # present=False until first TYPE_IMU frame
         self._have_status = False
 
         self._status_rate = _Ewma()
@@ -137,6 +138,20 @@ class TelemetryMapper:
         self._prev_status = s
         return events
 
+    def on_imu(self, imu: Dict, now: int) -> None:
+        # ESP32-only TYPE_IMU (0x04), decoded outside the frozen parser
+        # (see stm_reader._ImuTap). Telemetry-only: latest attitude, latched
+        # into every outgoing frame. No events, no control coupling.
+        self._latest_imu = pb.ImuState(
+            present=True,
+            pitch_deg=float(imu["pitch_deg"]),
+            yaw_deg=float(imu["yaw_deg"]),
+            cal_sys=int(imu["cal_sys"]),
+            cal_gyro=int(imu["cal_gyro"]),
+            cal_accel=int(imu["cal_accel"]),
+            cal_mag=int(imu["cal_mag"]),
+        )
+
     def on_heartbeat(self, hb: Dict, now: int) -> None:
         # Only the STM-sourced heartbeat carries the vehicle uptime we display.
         self._hb_rate.tick(now)
@@ -170,6 +185,7 @@ class TelemetryMapper:
             control=self._latest_control,
             status=self._latest_status,
             link=self._link_health(now),
+            imu=self._latest_imu,
         )
 
     def gateway_heartbeat(self, now: int) -> pb.GatewayHeartbeat:

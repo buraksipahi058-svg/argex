@@ -119,6 +119,7 @@ const LinkRow = ({ label, up, meta, unknown = false }) => (
 const VehicleControlPanel = ({ telemetry, stale }) => {
   const c = telemetry?.control;
   const s = telemetry?.status;
+  const im = telemetry?.imu;
   const MODE_COLOR = { LASER: C.modeLaser, DRIVE: C.accent, AUTO: C.modeAuto };
   const modeColor = MODE_COLOR[c?.mode] ?? C.textMuted;
   // aktifMod === AUTO means CH8 handed authority to the Jetson; autonomous_active
@@ -154,6 +155,15 @@ const VehicleControlPanel = ({ telemetry, stale }) => {
       <Bar percent={((c?.pan_deg ?? 0) / 180) * 100} color={C.accent} />
       <Row label="Tilt (dikey)" value={c ? `${c.tilt_deg}°` : '—'} />
       <Bar percent={((c?.tilt_deg ?? 0) / 180) * 100} color={C.accent} />
+
+      {/* Attitude from the BNO055 IMU (TYPE_IMU 0x04) — telemetry only. */}
+      <Row label="Pitch (IMU)" value={im?.present ? `${im.pitch_deg}°` : '—'} />
+      <SignedBar value={im?.present ? Math.max(-100, Math.min(100, im.pitch_deg)) : 0} />
+      <Row label="Yaw / Heading" value={im?.present ? `${im.yaw_deg}°` : '—'} />
+      <Bar percent={((im?.yaw_deg ?? 0) / 360) * 100} color={C.accent} />
+      <div style={{ fontSize: 8, color: C.textMuted, fontFamily: MONO, letterSpacing: '0.06em', fontWeight: 600, marginTop: -2 }}>
+        IMU CAL · sys {im?.present ? im.cal_sys : '–'} · gyro {im?.present ? im.cal_gyro : '–'} · acc {im?.present ? im.cal_accel : '–'} · mag {im?.present ? im.cal_mag : '–'}
+      </div>
 
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8, padding: '5px 7px', marginTop: 'auto',

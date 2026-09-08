@@ -49,7 +49,7 @@ def _event_name(v: int) -> str:
 
 
 def frame_to_dict(fr: pb.TelemetryFrame) -> Dict[str, Any]:
-    c, s, l = fr.control, fr.status, fr.link
+    c, s, l, im = fr.control, fr.status, fr.link, fr.imu
     return {
         "ts": fr.timestamp_unix_ms,
         "seq": fr.seq,
@@ -60,6 +60,15 @@ def frame_to_dict(fr: pb.TelemetryFrame) -> Dict[str, Any]:
             "tilt_deg": c.tilt_deg,
             "laser_on": c.laser_on,
             "mode": _mode_name(c.mode),
+        },
+        "imu": {
+            "present": im.present,
+            "pitch_deg": round(im.pitch_deg, 1),
+            "yaw_deg": round(im.yaw_deg, 1),
+            "cal_sys": im.cal_sys,
+            "cal_gyro": im.cal_gyro,
+            "cal_accel": im.cal_accel,
+            "cal_mag": im.cal_mag,
         },
         "status": {
             "elrs_link_up": s.elrs_link_up,

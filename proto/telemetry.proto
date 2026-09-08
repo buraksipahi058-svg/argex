@@ -141,6 +141,24 @@ message LinkHealth {
   int64  last_heartbeat_unix_ms = 8;// <- gateway receipt time of last HEARTBEAT
 }
 
+// ---- Vehicle attitude (IMU) ------------------------------------------------
+// BNO055 orientation, added to the ESP32 firmware as frame TYPE_IMU (0x04),
+// ESP->Jetson only, ~20 Hz, TELEMETRY-ONLY (never affects vehicle control and
+// never trips the controller's hardware-fault latch). The frozen reference
+// parser (needtocheck/jetson_parser.py) predates this frame and drops its
+// payload, so the gateway decodes it OUTSIDE that parser (jetson/stm_reader.py),
+// exactly as the ESP32-only durum bits are decoded from the raw byte.
+//   <- IMU.pitch (int16 deg*100), IMU.yaw (uint16 deg*100), IMU.cal (uint8).
+message ImuState {
+  bool   present   = 1;  // gateway has seen at least one TYPE_IMU frame
+  float  pitch_deg = 2;  // <- IMU.pitch / 100.0
+  float  yaw_deg   = 3;  // <- IMU.yaw   / 100.0   (0..359.99, absolute heading)
+  uint32 cal_sys   = 4;  // <- IMU.cal bits[7:6]  0..3 (3 = fully calibrated)
+  uint32 cal_gyro  = 5;  // <- IMU.cal bits[5:4]
+  uint32 cal_accel = 6;  // <- IMU.cal bits[3:2]
+  uint32 cal_mag   = 7;  // <- IMU.cal bits[1:0]
+}
+
 // ---- Periodic telemetry frame (high-frequency plane) -----------------------
 message TelemetryFrame {
   int64 timestamp_unix_ms      = 1;  // gateway wall-clock at emit
@@ -148,6 +166,7 @@ message TelemetryFrame {
   VehicleControlState control  = 3;
   SystemStatus status          = 4;
   LinkHealth link              = 5;
+  ImuState imu                 = 6;  // vehicle attitude; imu.present=false until first IMU frame
 }
 
 // ---- Event (event-driven plane, reliable) ----------------------------------

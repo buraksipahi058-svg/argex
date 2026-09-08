@@ -29,7 +29,7 @@ from pathlib import Path
 from .config import load_config, GatewayConfig
 from .mapper import TelemetryMapper, now_ms
 from .quic_client import QuicTelemetryClient
-from .stm_reader import StmReader, TYPE_STATUS, TYPE_HEARTBEAT
+from .stm_reader import StmReader, TYPE_STATUS, TYPE_HEARTBEAT, TYPE_IMU
 from .video_pipelines import CameraSupervisor
 
 log = logging.getLogger("jetson.gateway")
@@ -60,6 +60,9 @@ async def _reader_task(
                 client.send_event(ev)
         elif pkt["type"] == TYPE_HEARTBEAT and "heartbeat" in pkt:
             mapper.on_heartbeat(pkt["heartbeat"], now)
+        elif pkt["type"] == TYPE_IMU and "imu" in pkt:
+            # ESP32-only attitude frame (telemetry-only); latched into frames.
+            mapper.on_imu(pkt["imu"], now)
         # COMMAND or unknown types are ignored: the Base Station never consumes
         # or produces control traffic.
 

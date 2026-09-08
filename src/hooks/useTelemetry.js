@@ -56,6 +56,7 @@ export function useTelemetry() {
             setTelemetry({
               ts: msg.ts, seq: msg.seq,
               control: msg.control, status: msg.status, link: msg.link,
+              imu: msg.imu,
             });
             if (msg.conn) setConn(msg.conn);
             break;

@@ -37,6 +37,7 @@ _spec.loader.exec_module(_p)
 
 HDR0, HDR1, VERSION = _p.HDR0, _p.HDR1, _p.VERSION
 TYPE_STATUS, TYPE_HEARTBEAT = _p.TYPE_STATUS, _p.TYPE_HEARTBEAT
+TYPE_IMU = 0x04   # ESP32-only frame the frozen parser predates (see stm_reader._ImuTap)
 HB_KAYNAK_STM = _p.HB_KAYNAK_STM
 ST_JETSON_LINK, ST_CMD_TIMEOUT = _p.ST_JETSON_LINK, _p.ST_CMD_TIMEOUT
 ST_AUTO_EN, ST_FAILSAFE, ST_CRC_ERR = _p.ST_AUTO_EN, _p.ST_FAILSAFE, _p.ST_CRC_ERR
@@ -74,6 +75,10 @@ class FrameBuilder:
     def heartbeat(self, uptime_ms) -> bytes:
         payload = struct.pack("<BI", HB_KAYNAK_STM, uptime_ms & 0xFFFFFFFF)
         return self._frame(TYPE_HEARTBEAT, payload)
+
+    def imu(self, pitch_cdeg, yaw_cdeg, cal) -> bytes:
+        payload = struct.pack("<hHB", pitch_cdeg, yaw_cdeg, cal)
+        return self._frame(TYPE_IMU, payload)
 
 
 def scenario(t: float) -> dict:
@@ -127,8 +132,16 @@ def scenario(t: float) -> dict:
         # The firmware raises FAILSAFE together with the fault latch.
         durum |= ST_HW_ERROR | ST_FAILSAFE
 
+    # BNO055 attitude (TYPE_IMU): pitch wobbles, yaw sweeps as a heading; the
+    # calibration bits climb to fully-calibrated after the first few seconds.
+    imu_pitch = int(round(15.0 * math.sin(t * 0.5) * 100))     # +-15 deg -> deg*100
+    imu_yaw = int(round(((t * 20.0) % 360.0) * 100))           # slow heading sweep
+    sys_cal = 3 if phase >= 5.0 else 1
+    imu_cal = (sys_cal << 6) | (3 << 4) | (3 << 2) | sys_cal
+
     return dict(sol=sol, sag=sag, pan=pan, tilt=tilt,
-                lazer=lazer, mod=mode, elrs=1 if elrs else 0, durum=durum)
+                lazer=lazer, mod=mode, elrs=1 if elrs else 0, durum=durum,
+                imu_pitch=imu_pitch, imu_yaw=imu_yaw, imu_cal=imu_cal)
 
 
 def main() -> None:
@@ -137,6 +150,7 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--status-hz", type=float, default=20.0)
     ap.add_argument("--hb-hz", type=float, default=10.0)
+    ap.add_argument("--imu-hz", type=float, default=20.0)
     args = ap.parse_args()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -145,11 +159,13 @@ def main() -> None:
 
     status_dt = 1.0 / args.status_hz
     hb_dt = 1.0 / args.hb_hz
+    imu_dt = 1.0 / args.imu_hz if args.imu_hz > 0 else None
     t0 = time.time()
     next_status = t0
     next_hb = t0
+    next_imu = t0
 
-    print(f"fake_stm -> udp {args.host}:{args.port}  STATUS {args.status_hz}Hz  HB {args.hb_hz}Hz")
+    print(f"fake_stm -> udp {args.host}:{args.port}  STATUS {args.status_hz}Hz  HB {args.hb_hz}Hz  IMU {args.imu_hz}Hz")
     try:
         while True:
             now = time.time()
@@ -164,6 +180,10 @@ def main() -> None:
             if now >= next_hb:
                 next_hb += hb_dt
                 sock.sendto(fb.heartbeat(int((now - t0) * 1000)), dst)
+            if imu_dt is not None and now >= next_imu:
+                next_imu += imu_dt
+                s = scenario(now - t0)
+                sock.sendto(fb.imu(s["imu_pitch"], s["imu_yaw"], s["imu_cal"]), dst)
             time.sleep(0.002)
     except KeyboardInterrupt:
         print("\nfake_stm stopped")
