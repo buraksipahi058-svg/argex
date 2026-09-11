@@ -28,11 +28,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# Script ciktisi renkli (ANSI) — panelde ham kacis dizisi gorunmesin diye temizlenir.
+_ANSI = re.compile(r"\[[0-9;]*[A-Za-z]")
 
 SCRIPT = os.environ.get("UGV_DUMP_SCRIPT", "/root/argex/scripts/dump_recordings.sh")
 DEST = os.environ.get("UGV_DUMP_DEST", "/media/ugv-usb")
@@ -75,10 +79,12 @@ def _run() -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",                         # locale ne olursa olsun cokme
             bufsize=1,
         )
         for line in proc.stdout:                      # type: ignore[union-attr]
-            line = line.rstrip()
+            line = _ANSI.sub("", line).rstrip()
             if line:
                 with _lock:
                     _job["lines"].append(line)
