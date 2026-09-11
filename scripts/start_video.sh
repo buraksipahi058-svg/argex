@@ -79,20 +79,60 @@ fi
 
 # --- 4) kameralari push et ---
 push() {
-  local dev="$1" name="$2"
+  local dev="$1" name="$2" size="${3:-640x480}" br="${4:-1000k}" fps="${5:-30}"
   if [ -z "$dev" ]; then
     echo "!! $name: kamera BULUNAMADI (takili mi? dogru portta mi?)"; return
   fi
-  echo ">> $name <- $dev"
+  echo ">> $name <- $dev  (${size} @ ${br} @ ${fps}fps)"
   ffmpeg -hide_banner -nostdin -loglevel warning \
-    -f v4l2 -input_format mjpeg -framerate 30 -video_size 640x480 -i "$dev" \
+    -f v4l2 -input_format mjpeg -framerate "$fps" -video_size "$size" -i "$dev" \
     -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p \
-    -b:v 1000k -maxrate 1000k -bufsize 500k -g 30 \
+    -b:v "$br" -maxrate "$br" -bufsize 500k -g "$fps" \
     -f rtsp -rtsp_transport tcp "rtsp://127.0.0.1:8554/$name" >"/tmp/$name.log" 2>&1 &
 }
+# TARET pozlama kilidi: guneste lazer noktasinin kaybolmamasi icin otomatik
+# pozlamayi kapatip pozu kisiyoruz (bkz. jetson/config.yaml v4l2_controls).
+# Sahada ayarla: cok parlaksa EXPO'yu dusur, karanlikta yukselt (100us birimi).
+EXPO=${EXPO:-100}
+lock_exposure() {  # $1 = /dev/videoN
+  [ -n "$1" ] || return
+  for ctl in "auto_exposure=1" "exposure_auto=1" "exposure_time_absolute=$EXPO"              "exposure_absolute=$EXPO" "gain=0" "white_balance_automatic=0"              "white_balance_temperature_auto=0" "backlight_compensation=0"; do
+    v4l2-ctl -d "$1" --set-ctrl "$ctl" >/dev/null 2>&1   # bilinmeyen ad = sessiz gec
+  done
+  echo ">> taret pozlama kilidi: exposure=$EXPO, gain=0 (EXPO=<deger> ile degistir)"
+}
+lock_exposure "$TURRET"
+
+# turret tam kalite; on/arka 240p + dusuk bitrate + 15fps (CPU, USB ve bant tasarrufu)
 push "$TURRET" cam_turret
-push "$FRONT"  cam_front
-push "$REAR"   cam_rear
+push "$FRONT"  cam_front 320x240 400k 15
+push "$REAR"   cam_rear  320x240 400k 15
+
+# --- 5) USB dokum servisi (base station'daki "USB'YE AT" dugmesi icin) ---
+# Tek isli kucuk HTTP ucu: POST /dump -> scripts/dump_recordings.sh calisir.
+# Zaten ayaktaysa dokunmaz. Kapatmak icin: pkill -f dump_service.py
+if pgrep -f 'dump_service\.py' >/dev/null; then
+  echo ">> USB dokum servisi zaten calisiyor (:8099)"
+else
+  # Script kopyasi /root/start_video.sh olarak da durabiliyor; her iki yerleside dene.
+  SVC="${UGV_DUMP_SERVICE:-}"
+  if [ -z "$SVC" ]; then
+    for c in "$(dirname "$0")/../jetson/dump_service.py" /root/argex/jetson/dump_service.py; do
+      [ -f "$c" ] && SVC="$c" && break
+    done
+  fi
+  if [ -z "$SVC" ]; then
+    echo "!! dump_service.py bulunamadi (UGV_DUMP_SERVICE ile yolunu verebilirsin)"
+  else
+    python3 "$SVC" >/tmp/dump_service.log 2>&1 &
+    sleep 1
+    if pgrep -f 'dump_service\.py' >/dev/null; then
+      echo ">> USB dokum servisi ayakta (:8099)"
+    else
+      echo "!! USB dokum servisi baslamadi. Log:"; tail -3 /tmp/dump_service.log
+    fi
+  fi
+fi
 
 # --- durum ---
 sleep 3

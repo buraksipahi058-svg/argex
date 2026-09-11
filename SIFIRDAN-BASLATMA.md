@@ -348,6 +348,22 @@ Bu komut kayıtları diske kopyalar, dosya sayısını doğrular, `manifest.txt`
 `sync` eder ve diski **güvenle unmount eder** → çıkar, teslim et. (Diski exFAT
 formatla; `sda1` yerine kendi cihazını yaz — `lsblk -f` ile bul.)
 
+### 9.5 Aynı işi base station'daki düğmeden yapmak
+SSH açmadan, panelden tek tıkla da dökebilirsin. Jetson'da küçük bir servis
+([jetson/dump_service.py](jetson/dump_service.py)) 8099'da dinler; `start_video.sh`
+onu zaten başlatıyor (ayrı başlatmak için: `python3 /root/argex/jetson/dump_service.py &`).
+Servis istemciden komut almaz — sadece yukarıdaki `dump_recordings.sh`'i çalıştırır.
+
+Kullanımı: panelde **LIVE FEED · CAMERAS** başlığındaki `USB'YE AT` düğmesi.
+İlk tık `EMİN?` (yarışta yanlışlıkla basmayı önler), ikinci tık başlatır. Düğmenin
+solunda scriptin son satırı görünür: kopyalanıyor → manifest → `TAMAM — N dosya`
+(yeşil) ya da hata (kırmızı, ör. USB mount edilmemiş). Servise ulaşılamıyorsa
+düğme `USB SERVİSİ YOK` yazıp pasifleşir.
+
+> USB yine de **önce mount edilmiş olmalı** (9.4'teki `mount` komutu) — düğme
+> mount etmez, sadece dökümü çalıştırır. Kimlik doğrulaması yoktur; araç LAN'ı
+> kapalı olduğu için yeterli, servisi dışarı açık bir ağda çalıştırma.
+
 > USB diski hub'a takacaksan **beslemeli hub** kullan (Bölüm 7'deki `-110`
 > sorununun sebebi de bu). Yarış boyunca kayıt **dahili diske** düşer, USB'yi
 > sadece en sonda takıp dökmek en güvenlisidir.
